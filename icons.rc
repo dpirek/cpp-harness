@@ -1,0 +1,4 @@
+1 ICON "app.ico"
+101 RCDATA "third_party/bootstrap-icons/bootstrap-icons.ttf"
+102 RCDATA "third_party/bootstrap-icons/LICENSE"
+103 RCDATA "third_party/md4c/LICENSE.md"

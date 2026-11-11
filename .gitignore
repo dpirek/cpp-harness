@@ -1,0 +1,9 @@
+/build/
+
+.env
+.env.*
+!.env.example
+provider-settings.json
+provider-settings.json.tmp
+mcp-servers.json
+mcp-servers.json.tmp
