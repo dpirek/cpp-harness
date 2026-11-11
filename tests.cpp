@@ -130,6 +130,16 @@ int main(int argc,char** argv) {
             Check(content[2]["image_url"]["url"].get<std::string>().find("data:image/png;base64,iVBORw0KGg") == 0,"Images sent as base64 image parts");
             Check(content[3]["file"]["filename"]=="context.pdf"&&content[3]["file"]["file_data"].get<std::string>().find("data:application/pdf;base64,")==0,"PDF files sent as named base64 file parts");
             attached.text.clear();Check(nlohmann::json::parse(BuildPayload(config,{attached}))["messages"][1]["content"].size()==3,"Attachment-only messages supported");
+            Config router=config;router.url="https://openrouter.ai/api/v1/chat/completions";
+            auto routed=nlohmann::json::parse(BuildPayload(router,{attached}));
+            Check(routed["plugins"][0]["pdf"]["engine"]=="cloudflare-ai","OpenRouter PDFs use text extraction for text-only models");
+            router.url="https://example.com/v1";
+            Check(!nlohmann::json::parse(BuildPayload(router,{attached})).contains("plugins"),"Provider-specific PDF plugins excluded from other endpoints");
+            Message textDocument{L"user",L"Read this"};textDocument.attachments={attached.attachments[0]};
+            auto plain=nlohmann::json::parse(BuildPayload(config,{textDocument}))["messages"][1]["content"];
+            Check(plain.is_string()&&plain.get<std::string>().find("Read this\n\nAttached document: context.txt\nDocument context") == 0,"Text documents use ordinary string content for text-only providers");
+            textDocument.text.clear();
+            Check(nlohmann::json::parse(BuildPayload(config,{textDocument}))["messages"][1]["content"].get<std::string>().find("Attached document:")==0,"Document-only messages retain contents");
             Check(AttachmentBase64("f")=="Zg=="&&AttachmentBase64("fo")=="Zm8="&&AttachmentBase64("foo")=="Zm9v","Attachment base64 padding");
             {std::ofstream file(document,std::ios::binary);const unsigned char utf16[]{255,254,'H',0,'i',0};file.write(reinterpret_cast<const char*>(utf16),sizeof(utf16));}
             Check(LoadAttachment(document).data=="Hi","UTF-16 documents normalized to UTF-8");
@@ -249,6 +259,15 @@ int main(int argc,char** argv) {
         Check(Complete(config,history,cancel,endpoint).ok,"Chunked response reads");
         endpoint.path=L"/unauthorized";
         Check(Complete(config,history,cancel,endpoint).text.find(L"401")!=std::wstring::npos,"HTTP status error");
+        {
+            Message image{L"user",L"Describe"};image.attachments.push_back({L"photo.png","image/png","data:image/png;base64,fixture",7});
+            endpoint.path=L"/attachment-rejected";
+            auto imageFailure=Complete(config,{image},cancel,endpoint);
+            Check(!imageFailure.ok&&imageFailure.text.find(L"accepts images")!=std::wstring::npos&&imageFailure.text.find(Wide(config.model))!=std::wstring::npos,"Rejected image requests explain model compatibility");
+            Check(imageFailure.text.find(L"private details")==std::wstring::npos,"Attachment errors never expose provider bodies");
+            endpoint.path=L"/attachment-too-large";
+            Check(Complete(config,{image},cancel,endpoint).text.find(L"Reduce attachment sizes")!=std::wstring::npos,"Oversized attachment requests explain size recovery");
+        }
         for(auto path:{L"/malformed",L"/empty",L"/apierror",L"/oversized",L"/redirect"}) {
             endpoint.path=path;Check(!Complete(config,history,cancel,endpoint).ok,"Invalid HTTP response rejected");
         }

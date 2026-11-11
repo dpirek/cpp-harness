@@ -115,6 +115,8 @@ const server = http.createServer((req, res) => {
       }
       case '/loop': res.end(toolStream([{id:'loop_'+payload.messages.length,name:'unknown',arguments:'{}'}])); break;
       case '/unauthorized': res.writeHead(401).end('private error details'); break;
+      case '/attachment-rejected': res.writeHead(400).end('private details'); break;
+      case '/attachment-too-large': res.writeHead(413).end('private details'); break;
       case '/malformed': res.end('{invalid'); break;
       case '/empty': res.end(done); break;
       case '/apierror': res.end('data: {"error":{"message":"private details"}}\n\n'); break;
