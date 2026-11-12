@@ -3,6 +3,7 @@
 #include "stream_decoder.h"
 #include "agent.h"
 #include "powershell_tool.h"
+#include "computer_tool.h"
 #include "text_encoding.h"
 #include "code_format.h"
 #include "mcp_client.h"
@@ -303,6 +304,18 @@ int main(int argc,char** argv) {
         Cancellation cancelTool;std::thread killTool([&]{Sleep(250);cancelTool.Cancel();});
         tool=RunPowerShell(L"Start-Sleep -Seconds 10",directory,cancelTool,10);killTool.join();
         Check(tool.cancelled,"PowerShell cancellation terminates process job");
+        Check(RunComputer({{"action","click"},{"x",-2147483647},{"y",0}},cancel).output.contains("error"),"Computer rejects coordinates before sending input");
+        Check(RunComputer({{"action","key"},{"keys",{"CTRL","invalid-key"}}},cancel).output.contains("error"),"Computer validates entire chord before pressing modifiers");
+        Check(RunComputer({{"action","wait"},{"milliseconds",5001}},cancel).output.contains("error"),"Computer wait is bounded");
+        Check(RunComputer({{"action","type"},{"text",4}},cancel).output.contains("error"),"Computer validates argument types");
+        Check(RunComputer({{"action","scroll"},{"delta",21}},cancel).output.contains("error"),"Computer scroll is bounded");
+        Check(RunComputer({{"action","wait"},{"milliseconds",0},{"unknown",true}},cancel).output.contains("error"),"Computer rejects unknown arguments");
+        Cancellation stoppedComputer;stoppedComputer.Cancel();
+        Check(RunComputer({{"action","screenshot"}},stoppedComputer).output.contains("error"),"Computer cancellation prevents capture");
+        endpoint.path=L"/agent-computer";endpoint.timeoutMs=10000;
+        auto desktopAgent=RunAgent(config,{{L"user",L"Inspect desktop"}},directory,cancel,endpoint);
+        if(!desktopAgent.reply.ok||desktopAgent.reply.text!=L"Desktop received"){std::cerr<<Utf8(desktopAgent.reply.text)<<"\n";for(auto& m:desktopAgent.history)if(m.role==L"tool")std::cerr<<Utf8(m.text)<<"\n";}
+        Check(desktopAgent.reply.ok&&desktopAgent.reply.text==L"Desktop received","Computer screenshot encoded and delivered through full agent loop");
         endpoint.path=L"/agent";endpoint.timeoutMs=10000;
         std::vector<AgentUpdate> updates;
         auto agent=RunAgent(config,{{L"user",L"Run the test tools"}},directory,cancel,endpoint,[&](AgentUpdate update){updates.push_back(std::move(update));});

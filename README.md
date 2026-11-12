@@ -61,6 +61,16 @@ PowerShell calls start fresh in the configuration/project directory. They run hi
 
 New chat clears history and cancels the current operation. Completed filesystem changes remain. API history retains assistant tool calls and their results for follow-up prompts; it is separate from the visible progress and tool display. Conversations remain in memory only. Requests use your OpenRouter account and may incur model charges.
 
+## Computer control
+
+The built-in `computer` tool lets the agent operate the Windows desktop using screenshots, pointer movement, left/right/middle clicks, double clicks, dragging, vertical scrolling, Unicode typing, key combinations, and cancellable waits. Choose a model that supports both vision and function tools, then ask for a desktop task in chat. No MCP server or extra runtime is needed.
+
+Screenshots capture all monitors as a PNG and send it to your configured provider. The result includes `left`, `top`, `width`, and `height` in physical desktop pixels. Image pixel `(0,0)` maps to desktop `(left,top)`; monitors left of the primary display can have negative coordinates. Actions use those desktop coordinates. Only the newest screenshot batch stays in model history to bound image usage. Screenshots are held in memory and are not written to disk.
+
+Examples: `{"action":"screenshot"}`, `{"action":"click","x":500,"y":400}`, `{"action":"key","keys":["CTRL","L"]}`, `{"action":"type","text":"Hello"}`, and `{"action":"scroll","delta":-3}`. Drag uses `x`, `y`, `to_x`, and `to_y`. Positive scroll deltas go up. Key combinations release their modifiers after execution.
+
+Input affects the active desktop and focused application, with the app's ordinary Windows permissions. Keep the session unlocked and avoid using the mouse and keyboard during a task. Elevated windows and secure desktops may reject input. Stop cancels further actions and waits; completed input remains. The existing eight-turn / sixteen-tool-call limits apply; send a follow-up to continue longer tasks. Tool activity and errors appear in chat.
+
 ## MCP servers
 
 Open **Settings** and select the **MCP** tab beside **Provider**. Both tabs use square edges and 1px separators. Add servers using the standard `mcpServers` JSON object, click **Test connections** to see discovered tools, then **Save**. Switching tabs retains your edits, and Save validates and keeps changes from both tabs. **Example** inserts disabled local and remote entries. Cancel discards unsaved edits.

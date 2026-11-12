@@ -62,6 +62,18 @@ const server = http.createServer((req, res) => {
       case '/markdown/chat/completions':
         res.end(delta('# Formatted response\n\n**Bold** and *italic*, `inline code`, [link](https://example.com).\n\n- Bullet item\n- [x] Task done\n\n> Quoted text.\n\n| Name | Value |\n| --- | --- |\n| XML | Yes |\n\n```xml\n<root>value</root>\n```\n')+done);
         break;
+      case '/agent-computer': {
+        const outputs=payload.messages.filter(m=>m.role==='tool');
+        if(!payload.tools.some(t=>t.function.name==='computer')){res.writeHead(400).end();break;}
+        if(!outputs.length)res.end(toolStream([{id:'screen',name:'computer',arguments:'{"action":"screenshot"}'}]));
+        else {
+          const image=payload.messages.at(-1);
+          const bounds=JSON.parse(outputs.at(-1).content);
+          if(outputs.at(-1).tool_call_id!=='screen'||!bounds.width||image.role!=='user'||!image.content?.[1]?.image_url?.url.startsWith('data:image/png;base64,iVBOR'))res.writeHead(400).end();
+          else res.end(delta('Desktop received')+done);
+        }
+        break;
+      }
       case '/agent-mcp': {
         const tool=payload.tools.find(t=>t.function.name.startsWith('mcp_'));
         const output=payload.messages.find(m=>m.role==='tool');

@@ -1,4 +1,6 @@
 #include "agent.h"
+#include "computer_tool.h"
+#include <algorithm>
 #include "powershell_tool.h"
 #include "text_encoding.h"
 #include "third_party/nlohmann/json.hpp"
@@ -63,6 +65,7 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
         if(reply.toolCalls.empty()){result.reply=std::move(reply);break;}
         // Close commentary before displaying tool activity and the next model turn.
         emit(UpdateKind::SegmentEnd,reply.text);
+        std::vector<Attachment> screenshots;
         for(auto& call:reply.toolCalls) {
             if(cancel.IsCancelled()){result.reply.cancelled=true;break;}
             nlohmann::json output;
@@ -81,6 +84,15 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
                     auto display=McpDisplay(output);
                     emit(UpdateKind::Tool,display.substr(0,4000)+(display.size()>4000?L"\n[output truncated]":L""));
                 }
+            } else if(call.name=="computer") {
+                ++totalTools;
+                auto args=nlohmann::json::parse(call.arguments,nullptr,false);
+                status(L"Computer running");
+                emit(UpdateKind::Tool,L"Computer action");
+                auto computer=RunComputer(args,cancel);
+                output=std::move(computer.output);
+                if(!computer.screenshot.data.empty())screenshots.push_back(std::move(computer.screenshot));
+                emit(UpdateKind::Tool,ToolOutput(Wide(output.dump())));
             } else if(call.name!="powershell") {
                 output={{"error","Unknown tool. Use one of the tools listed in this request."}};
                 emit(UpdateKind::Tool,L"Tool rejected \u00b7 "+Wide(call.name));
@@ -110,6 +122,12 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
             }
             Message toolMessage{L"tool",Wide(output.dump())};toolMessage.toolCallId=call.id;
             history.push_back(std::move(toolMessage));
+        }
+        if(!screenshots.empty()) {
+            // Images follow all matching tool results for Chat Completions compatibility.
+            for(auto& message:history)message.attachments.erase(std::remove_if(message.attachments.begin(),message.attachments.end(),[](const Attachment& a){return a.name==L"Desktop screenshot";}),message.attachments.end());
+            Message image{L"user",L"Computer screenshot from the preceding tool call. Use the tool's desktop bounds for coordinates."};
+            image.attachments=std::move(screenshots);history.push_back(std::move(image));
         }
         if(result.reply.cancelled)break;
         if(round==7||totalTools>=16){result.reply.text=L"Stopped at the agent step limit. Send a follow-up to continue.";break;}

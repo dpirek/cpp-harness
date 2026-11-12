@@ -25,11 +25,11 @@ if errorlevel 1 exit /b %errorlevel%
 if /i "%~1"=="test" goto test
 rc /nologo /fo build\icons.res icons.rc
 if errorlevel 1 exit /b %errorlevel%
-cl /nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE main.cpp markdown.cpp config.cpp chat_client.cpp stream_decoder.cpp powershell_tool.cpp mcp_client.cpp agent.cpp chat_worker.cpp /Fo:build\ /Fe:build\chat.exe /link build\icons.res build\md4c.obj build\entity.obj /SUBSYSTEM:WINDOWS /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" user32.lib gdi32.lib winhttp.lib dwmapi.lib
+cl /nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE main.cpp markdown.cpp config.cpp chat_client.cpp stream_decoder.cpp powershell_tool.cpp computer_tool.cpp mcp_client.cpp agent.cpp chat_worker.cpp /Fo:build\ /Fe:build\chat.exe /link build\icons.res build\md4c.obj build\entity.obj /SUBSYSTEM:WINDOWS /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" user32.lib gdi32.lib winhttp.lib dwmapi.lib
 exit /b %errorlevel%
 
 :test
-cl /nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE tests.cpp markdown.cpp config.cpp chat_client.cpp stream_decoder.cpp powershell_tool.cpp mcp_client.cpp agent.cpp chat_worker.cpp /Fo:build\ /Fe:build\chat-tests.exe /link build\md4c.obj build\entity.obj /INCREMENTAL:NO winhttp.lib
+cl /nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE tests.cpp markdown.cpp config.cpp chat_client.cpp stream_decoder.cpp powershell_tool.cpp computer_tool.cpp mcp_client.cpp agent.cpp chat_worker.cpp /Fo:build\ /Fe:build\chat-tests.exe /link build\md4c.obj build\entity.obj /INCREMENTAL:NO winhttp.lib
 if errorlevel 1 exit /b %errorlevel%
 node tests\mock_server.cjs
 exit /b %errorlevel%
