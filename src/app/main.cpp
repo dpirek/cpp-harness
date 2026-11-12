@@ -43,6 +43,10 @@ bool busy=false;
 bool sidebarExpanded=true,sidebarWide=true;
 std::optional<size_t> streamingMessage;
 std::optional<size_t> currentPrompt;
+std::optional<size_t> recalledPrompt;
+std::wstring promptRecallDraft;
+DWORD promptDraftSelection=0;
+bool recallingPrompt=false;
 int scroll=0,sideWidth=260;
 unsigned generation=0;
 std::filesystem::path configDirectory;
@@ -690,8 +694,54 @@ void StopAgent() {
     SetWindowTextW(sendButton,L"Send message");InvalidateRect(sendButton,nullptr,TRUE);
     PersistChat();InvalidateRect(app,nullptr,TRUE);SetFocus(input);
 }
+void RecallPrompt(bool previous) {
+    std::vector<std::wstring> prompts;
+    for(const auto& message:apiHistory) {
+        bool screenshot=std::any_of(message.attachments.begin(),message.attachments.end(),[](const auto& a){return a.name==L"Desktop screenshot";});
+        if(message.role==L"user"&&!message.text.empty()&&!screenshot)prompts.push_back(message.text);
+    }
+    if(prompts.empty())return;
+    if(!recalledPrompt) {
+        if(!previous)return;
+        promptRecallDraft=ControlText(app,3);promptDraftSelection=static_cast<DWORD>(SendMessageW(input,EM_GETSEL,0,0));recalledPrompt=prompts.size();
+    }
+    auto position=std::min(*recalledPrompt,prompts.size());
+    if(previous){if(position>0)--position;}else if(position<prompts.size())++position;
+    recallingPrompt=true;SetWindowTextW(input,position<prompts.size()?prompts[position].c_str():promptRecallDraft.c_str());recallingPrompt=false;
+    if(position==prompts.size()) {
+        SendMessageW(input,EM_SETSEL,LOWORD(promptDraftSelection),HIWORD(promptDraftSelection));recalledPrompt.reset();promptRecallDraft.clear();
+    } else {recalledPrompt=position;auto end=GetWindowTextLengthW(input);SendMessageW(input,EM_SETSEL,end,end);}
+    SendMessageW(input,EM_SCROLLCARET,0,0);
+}
 LRESULT CALLBACK InputProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     if(message==WM_DROPFILES)return SendMessageW(app,message,wParam,lParam);
+    if(message==WM_KEYDOWN) {
+        bool control=(GetKeyState(VK_CONTROL)&0x8000)!=0,shift=(GetKeyState(VK_SHIFT)&0x8000)!=0,alt=(GetKeyState(VK_MENU)&0x8000)!=0;
+        if(control&&!alt) {
+            if(wParam=='A'){SendMessageW(window,EM_SETSEL,0,-1);return 0;}
+            if(wParam=='C'){SendMessageW(window,WM_COPY,0,0);return 0;}
+            if(wParam=='X'){SendMessageW(window,WM_CUT,0,0);return 0;}
+            if(wParam=='V'){SendMessageW(window,WM_PASTE,0,0);return 0;}
+            if(wParam=='Z'){SendMessageW(window,WM_UNDO,0,0);return 0;}
+        }
+        if(!control&&!shift&&!alt&&(wParam==VK_UP||wParam==VK_DOWN)){RecallPrompt(wParam==VK_UP);return 0;}
+    }
+    if(message==WM_CHAR&&(GetKeyState(VK_CONTROL)&0x8000)&&(wParam==1||wParam==3||wParam==22||wParam==24||wParam==26))return 0;
+    if(message==WM_CONTEXTMENU) {
+        SetFocus(window);auto selection=static_cast<DWORD>(SendMessageW(window,EM_GETSEL,0,0));bool selected=LOWORD(selection)!=HIWORD(selection);
+        auto menu=CreatePopupMenu();
+        AppendMenuW(menu,MF_STRING|(SendMessageW(window,EM_CANUNDO,0,0)?0:MF_GRAYED),1,L"Undo\tCtrl+Z");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(menu,MF_STRING|(selected?0:MF_GRAYED),2,L"Cut\tCtrl+X");AppendMenuW(menu,MF_STRING|(selected?0:MF_GRAYED),3,L"Copy\tCtrl+C");
+        AppendMenuW(menu,MF_STRING|((IsClipboardFormatAvailable(CF_UNICODETEXT)||IsClipboardFormatAvailable(CF_TEXT))?0:MF_GRAYED),4,L"Paste\tCtrl+V");
+        AppendMenuW(menu,MF_STRING|(selected?0:MF_GRAYED),5,L"Delete");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(menu,MF_STRING|(GetWindowTextLengthW(window)>0?0:MF_GRAYED),6,L"Select all\tCtrl+A");
+        POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+        if(point.x==-1&&point.y==-1){RECT rect{};GetWindowRect(window,&rect);point={rect.left+Px(12),rect.top+Px(12)};}
+        auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window,nullptr);DestroyMenu(menu);
+        if(command==1)SendMessageW(window,WM_UNDO,0,0);else if(command==2)SendMessageW(window,WM_CUT,0,0);else if(command==3)SendMessageW(window,WM_COPY,0,0);else if(command==4)SendMessageW(window,WM_PASTE,0,0);else if(command==5)SendMessageW(window,WM_CLEAR,0,0);else if(command==6)SendMessageW(window,EM_SETSEL,0,-1);
+        return 0;
+    }
+    if(message==WM_SETTEXT&&!recallingPrompt){recalledPrompt.reset();promptRecallDraft.clear();}
     if(message==WM_KEYDOWN&&wParam==VK_RETURN&&!(GetKeyState(VK_SHIFT)&0x8000)){Send();return 0;}
     if(message==WM_CHAR&&wParam==L'\r'&&!(GetKeyState(VK_SHIFT)&0x8000))return 0;
     LRESULT result=CallWindowProcW(oldInputProc,window,message,wParam,lParam);
@@ -1056,7 +1106,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
             TOOLINFOW tool{};tool.cbSize=sizeof(tool);tool.uFlags=TTF_IDISHWND|TTF_SUBCLASS;tool.hwnd=window;tool.uId=reinterpret_cast<UINT_PTR>(control);tool.lpszText=LPSTR_TEXTCALLBACKW;
             SendMessageW(navTooltips,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tool));
         }
-        input=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,0,0,0,0,window,reinterpret_cast<HMENU>(3),instance,nullptr);
+        input=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN|ES_NOHIDESEL,0,0,0,0,window,reinterpret_cast<HMENU>(3),instance,nullptr);
         SendMessageW(input,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);SendMessageW(input,EM_SETLIMITTEXT,12000,0);
         SendMessageW(input,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,0);
         oldInputProc=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(input,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(InputProc)));
@@ -1087,7 +1137,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(LOWORD(wParam)==6&&HIWORD(wParam)==BN_CLICKED){pendingAttachments.clear();Layout();SetFocus(input);return 0;}
         if(LOWORD(wParam)==4){sidebarExpanded=!sidebarExpanded;Layout();return 0;}
         if(HIWORD(wParam)==BN_CLICKED){switch(LOWORD(wParam)){case 1:Reset();break;case 2:OpenSettings();break;case 5:if(busy)StopAgent();else Send();break;case 10:ShowWindow(window,SW_MINIMIZE);break;case 11:ShowWindow(window,IsZoomed(window)?SW_RESTORE:SW_MAXIMIZE);break;case 12:PostMessageW(window,WM_CLOSE,0,0);break;}}
-        if(HIWORD(wParam)==EN_CHANGE&&LOWORD(wParam)==3){Layout(true);if(!restoringChat)SetTimer(window,9,700,nullptr);}
+        if(HIWORD(wParam)==EN_CHANGE&&LOWORD(wParam)==3){if(!recallingPrompt){recalledPrompt.reset();promptRecallDraft.clear();}Layout(true);if(!restoringChat)SetTimer(window,9,700,nullptr);}
         return 0;
     case WM_NOTIFY: {
         auto notification=reinterpret_cast<NMHDR*>(lParam);

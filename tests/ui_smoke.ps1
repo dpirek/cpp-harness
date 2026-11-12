@@ -362,6 +362,31 @@ try {
    $null=[UiCheck]::GetText($inputWindow,13,[IntPtr]128,$draft)
    if($draft.ToString() -ne 'Keep this draft'){throw 'Stop must preserve the draft.'}
   }
+  $promptHistory=Get-Content -LiteralPath (Join-Path $isolated 'chat-history.json') -Raw | ConvertFrom-Json
+  $currentChat=$promptHistory.chats | Where-Object { $_.id -eq $promptHistory.active_chat_id }
+  $previousPrompts=@($currentChat.context | Where-Object { $_.role -eq 'user' -and $_.text -and !(@($_.attachments | Where-Object { $_.name -eq 'Desktop screenshot' }).Count) } | ForEach-Object { $_.text })
+  $null=[UiCheck]::SendMessage($inputWindow,0xb1,[IntPtr]2,[IntPtr]5)
+  for($promptIndex=$previousPrompts.Count-1;$promptIndex -ge 0;$promptIndex--) {
+   $null=[UiCheck]::SendMessage($inputWindow,0x100,[IntPtr]38,[IntPtr]::Zero)
+   $recalled=New-Object System.Text.StringBuilder 16384;$null=[UiCheck]::GetText($inputWindow,13,[IntPtr]16384,$recalled)
+   if($recalled.ToString() -ne $previousPrompts[$promptIndex]){throw 'Up must recall previous sent prompts in order.'}
+  }
+  for($promptIndex=1;$promptIndex -lt $previousPrompts.Count;$promptIndex++) {
+   $null=[UiCheck]::SendMessage($inputWindow,0x100,[IntPtr]40,[IntPtr]::Zero)
+   $recalled=New-Object System.Text.StringBuilder 16384;$null=[UiCheck]::GetText($inputWindow,13,[IntPtr]16384,$recalled)
+   if($recalled.ToString() -ne $previousPrompts[$promptIndex]){throw 'Down must recall next sent prompts in order.'}
+  }
+  $null=[UiCheck]::SendMessage($inputWindow,0x100,[IntPtr]40,[IntPtr]::Zero)
+  $draft=New-Object System.Text.StringBuilder 128;$null=[UiCheck]::GetText($inputWindow,13,[IntPtr]128,$draft)
+  if($draft.ToString() -ne 'Keep this draft'){throw 'Down after newest prompt must restore the unsent draft.'}
+  $selection=[UiCheck]::SendMessage($inputWindow,0xb0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64()
+  if(($selection -band 65535) -ne 2 -or ($selection -shr 16) -ne 5){throw 'Restoring the draft must preserve its selection.'}
+  $null=[UiCheck]::SendMessage($inputWindow,0x100,[IntPtr]38,[IntPtr]::Zero)
+  $null=[UiCheck]::SetText($inputWindow,12,[IntPtr]::Zero,'Edited recalled prompt')
+  $null=[UiCheck]::SendMessage($inputWindow,0x100,[IntPtr]40,[IntPtr]::Zero)
+  $edited=New-Object System.Text.StringBuilder 128;$null=[UiCheck]::GetText($inputWindow,13,[IntPtr]128,$edited)
+  if($edited.ToString() -ne 'Edited recalled prompt'){throw 'Editing a recalled prompt must begin a new draft.'}
+  $null=[UiCheck]::SetText($inputWindow,12,[IntPtr]::Zero,'Keep this draft')
   SaveWindowPreview $window 'send-stop-preview.png'
  }
  if($ModelServerPort){
