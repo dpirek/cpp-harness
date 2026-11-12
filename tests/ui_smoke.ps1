@@ -124,7 +124,7 @@ try {
  for($attempt=0;$attempt -lt 50;$attempt++){Start-Sleep -Milliseconds 100;$dialog=[UiCheck]::FindDialog($process.Id);if($dialog -ne [IntPtr]::Zero){break}}
  if($dialog -eq [IntPtr]::Zero -or [UiCheck]::IsWindowEnabled($window)){throw 'Settings must open as a modal.'}
  AssertModalChrome $dialog
- foreach($id in @(101,102,103,105,106,1,2)){if([UiCheck]::GetDlgItem($dialog,$id) -eq [IntPtr]::Zero){throw "Settings control $id missing."}}
+ foreach($id in @(101,102,103,105,106,108,109,1,2)){if([UiCheck]::GetDlgItem($dialog,$id) -eq [IntPtr]::Zero){throw "Settings control $id missing."}}
  if([UiCheck]::SendMessage([UiCheck]::GetDlgItem($dialog,102),0xd2,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]::Zero){throw 'API key must be masked.'}
  if($ModelServerPort){
   $null=[UiCheck]::SetText([UiCheck]::GetDlgItem($dialog,101),12,[IntPtr]::Zero,"http://127.0.0.1:$ModelServerPort/v1/chat/completions")
@@ -141,6 +141,15 @@ try {
   $models=[UiCheck]::GetDlgItem($dialog,103)
   for($attempt=0;$attempt -lt 100;$attempt++){Start-Sleep -Milliseconds 100;if([UiCheck]::SendMessage($models,0x146,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64() -eq 2){break}}
   if($attempt -eq 100){throw 'Models did not populate after entering a key.'}
+  $null=[UiCheck]::SetText([UiCheck]::GetDlgItem($dialog,108),12,[IntPtr]::Zero,'12')
+  $null=[UiCheck]::SetText([UiCheck]::GetDlgItem($dialog,109),12,[IntPtr]::Zero,'40')
+  $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]110,[IntPtr]::Zero)
+  $promptEditor=[UiCheck]::GetDlgItem($dialog,501)
+  if(![UiCheck]::IsWindowVisible($promptEditor)){throw 'System prompt editor must be visible.'}
+  $customPrompt='Custom instructions'+[Environment]::NewLine+'Second line'
+  $null=[UiCheck]::SetText($promptEditor,12,[IntPtr]::Zero,$customPrompt)
+  SaveWindowPreview $dialog 'system-prompt-preview.png'
+  $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]105,[IntPtr]::Zero)
   SaveWindowPreview $dialog 'settings-preview.png'
   $null=[UiCheck]::SendMessage($models,0x14e,[IntPtr]1,[IntPtr]::Zero)
   $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]1,[IntPtr]::Zero)
@@ -152,6 +161,20 @@ try {
   $selected=New-Object System.Text.StringBuilder 512
   $null=[UiCheck]::GetText($models,13,[IntPtr]512,$selected)
   if($selected.ToString() -ne 'z/model'){throw 'Model selection was not restored after reopening settings.'}
+  $promptText=New-Object System.Text.StringBuilder 4096
+  $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($dialog,501),13,[IntPtr]4096,$promptText)
+  if($promptText.ToString() -ne $customPrompt){throw 'System prompt did not persist.'}
+  $promptPage=[UiCheck]::GetParent([UiCheck]::GetDlgItem($dialog,501))
+  $null=[UiCheck]::SendMessage($promptPage,0x111,[IntPtr]502,[IntPtr]::Zero)
+  $defaultText=New-Object System.Text.StringBuilder 8192
+  $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($dialog,501),13,[IntPtr]8192,$defaultText)
+  if(!$defaultText.ToString().StartsWith('You are a coding assistant')){throw 'Restore default prompt failed.'}
+  $null=[UiCheck]::SetText([UiCheck]::GetDlgItem($dialog,501),12,[IntPtr]::Zero,$customPrompt)
+  foreach($item in @(@(108,'12'),@(109,'40'))) {
+   $limit=New-Object System.Text.StringBuilder 32
+   $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($dialog,$item[0]),13,[IntPtr]32,$limit)
+   if($limit.ToString() -ne $item[1]){throw 'Run limit was not restored after reopening settings.'}
+  }
   $null=[UiCheck]::SetText([UiCheck]::GetDlgItem($dialog,103),12,[IntPtr]::Zero,'test/model')
   $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]106,[IntPtr]::Zero)
   if(![UiCheck]::IsWindowVisible([UiCheck]::GetDlgItem($dialog,201)) -or [UiCheck]::IsWindowVisible([UiCheck]::GetDlgItem($dialog,101))){throw 'MCP tab must replace Provider in the same modal.'}
@@ -255,6 +278,12 @@ try {
  if([UiCheck]::IsZoomed($window)){throw 'Restore button failed.'}
  $null=[UiCheck]::SetWindowPos($window,[IntPtr]::Zero,60,60,1120,820,0x14)
  Start-Sleep -Milliseconds 150
+ $narrowWidth=[int][Math]::Round(360*[UiCheck]::GetDpiForWindow($window)/96)
+ $null=[UiCheck]::SetWindowPos($window,[IntPtr]::Zero,60,60,$narrowWidth,820,0x14)
+ $narrowInput=New-Object UiCheck+Rect
+ $null=[UiCheck]::GetWindowRect($inputWindow,[ref]$narrowInput)
+ if($narrowInput.Right -le $narrowInput.Left){throw 'Narrow window must retain a usable input.'}
+ $null=[UiCheck]::SetWindowPos($window,[IntPtr]::Zero,60,60,1120,820,0x14)
  $client=New-Object UiCheck+Rect;$null=[UiCheck]::GetClientRect($window,[ref]$client)
  $bitmap=New-Object Drawing.Bitmap($client.Right,$client.Bottom)
  $graphics=[Drawing.Graphics]::FromImage($bitmap)

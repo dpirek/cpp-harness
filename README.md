@@ -61,6 +61,10 @@ PowerShell calls start fresh in the configuration/project directory. They run hi
 
 New chat clears history and cancels the current operation. Completed filesystem changes remain. API history retains assistant tool calls and their results for follow-up prompts; it is separate from the visible progress and tool display. Conversations remain in memory only. Requests use your OpenRouter account and may incur model charges.
 
+Open **Settings > System Prompt** to edit the model?s system instructions. **Restore default** restores the built-in instructions in the editor; **Save** applies changes to subsequent runs, and **Cancel** discards edits. An empty prompt is allowed.
+
+The main window can be resized down to 360 DIP wide (half the previous minimum); the sidebar automatically uses its compact rail below 720 DIP.
+
 ## Computer control
 
 Open **Settings > Computer Control > Test access** to verify a real mouse click, keyboard text delivery, and screenshot capture in the settings test field. The result identifies failed checks. **Test mouse circle** moves the pointer around a visible circle for three seconds, checks that each position was reached, and returns it to its starting position. Keep Settings in the foreground and the desktop unlocked while testing. Windows blocks input to elevated applications and secure desktops from a normal application.

@@ -101,16 +101,19 @@ int main(int argc,char** argv) {
         SaveConfig(directory,keyless);
         Check(LoadConfig(directory).key.empty(),"Keyless settings persist without borrowing environment credentials");
         Config saved;saved.key="settings-secret";saved.model="custom/model";saved.url="http://localhost:8080/v1/chat/completions?version=1";
-        saved.maxModelTurns=12;saved.maxToolCalls=40;
+        saved.maxModelTurns=12;saved.maxToolCalls=40;saved.systemPrompt="Custom instructions\nSecond line: \xe6\x97\xa5";
         SaveConfig(directory,saved);
         auto restored=LoadConfig(directory);
         Check(restored.key==saved.key&&restored.model==saved.model&&restored.url==saved.url,"Provider settings persist with encrypted key");
         {std::ifstream file(directory/L"provider-settings.json");std::string body((std::istreambuf_iterator<char>(file)),{});Check(body.find(saved.key)==std::string::npos,"Saved key is not plaintext");}
         Check(restored.maxModelTurns==12&&restored.maxToolCalls==40,"Run limits persist with provider settings");
+        Check(restored.systemPrompt==saved.systemPrompt,"Custom multiline Unicode system prompt persists");
+        Check(nlohmann::json::parse(BuildPayload(restored,{}))["messages"][0]["content"]==saved.systemPrompt,"Saved system prompt replaces default in model requests");
+        auto blankPrompt=restored;blankPrompt.systemPrompt="";Check(nlohmann::json::parse(BuildPayload(blankPrompt,{}))["messages"][0]["content"]=="","Intentionally empty system prompt is respected");
         auto invalidLimits=saved;invalidLimits.maxModelTurns=0;bool rejectedLimit=false;try{ValidateConfig(invalidLimits);}catch(...){rejectedLimit=true;}Check(rejectedLimit,"Zero model turn limit rejected");
         invalidLimits=saved;invalidLimits.maxToolCalls=1001;rejectedLimit=false;try{ValidateConfig(invalidLimits);}catch(...){rejectedLimit=true;}Check(rejectedLimit,"Excessive tool limit rejected");
-        {std::ifstream file(directory/L"provider-settings.json");auto old=nlohmann::json::parse(file);file.close();old.erase("max_model_turns");old.erase("max_tool_calls");std::ofstream out(directory/L"provider-settings.json");out<<old.dump();}
-        auto legacyLimits=LoadConfig(directory);Check(legacyLimits.maxModelTurns==8&&legacyLimits.maxToolCalls==16,"Older saved settings retain default run limits");
+        {std::ifstream file(directory/L"provider-settings.json");auto old=nlohmann::json::parse(file);file.close();old.erase("max_model_turns");old.erase("max_tool_calls");old.erase("system_prompt");std::ofstream out(directory/L"provider-settings.json");out<<old.dump();}
+        auto legacyLimits=LoadConfig(directory);Check(legacyLimits.maxModelTurns==8&&legacyLimits.maxToolCalls==16&&legacyLimits.systemPrompt==DefaultSystemPrompt(),"Older saved settings retain default run limits");
         auto parsedProvider=ProviderEndpoint(saved.url);
         Check(parsedProvider.host==L"localhost"&&parsedProvider.port==8080&&!parsedProvider.secure&&parsedProvider.path==L"/v1/chat/completions?version=1","Custom provider URL routing");
         bool badUrl=false;try{ProviderEndpoint("https://user:password@example.com/path");}catch(...){badUrl=true;}Check(badUrl,"Provider URL credentials rejected");

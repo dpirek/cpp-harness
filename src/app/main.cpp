@@ -37,7 +37,7 @@ HBRUSH surfaceBrush;
 WNDPROC oldInputProc,oldButtonProc;
 UINT dpi=96;
 bool busy=false;
-bool sidebarExpanded=true;
+bool sidebarExpanded=true,sidebarWide=true;
 std::optional<size_t> streamingMessage;
 std::optional<size_t> currentPrompt;
 int scroll=0,sideWidth=260;
@@ -99,7 +99,8 @@ void Layout() {
     GetClientRect(app,&layout.client);
     int width=layout.client.right,height=layout.client.bottom;
     if(width<=0||height<=0)return;
-    sideWidth=sidebarExpanded?Px(width<Px(1000)?228:260):Px(72);
+    sidebarWide=sidebarExpanded&&width>=Px(720);
+    sideWidth=sidebarWide?Px(width<Px(1000)?228:260):Px(72);
     layout.sidebar={0,Px(Header),sideWidth,height};
     int available=width-sideWidth-2*Px(Space);
     int columnWidth=std::min(Px(880),available);
@@ -121,11 +122,11 @@ void Layout() {
     layout.composer={left,height-Px(Space)-composerHeight,left+columnWidth,height-Px(Space)};
     layout.conversation={left,Px(Header+Space),left+columnWidth,layout.composer.top-Px(Space)};
     // A 40 DIP icon button has 16 DIP clearance around its hover rectangle.
-    int iconLeft=sidebarExpanded?sideWidth-Px(56):(sideWidth-Px(40))/2;
+    int iconLeft=sidebarWide?sideWidth-Px(56):(sideWidth-Px(40))/2;
     MoveWindow(newButton,0,Px(Header+72),sideWidth,Px(56),TRUE);
     MoveWindow(settingsButton,iconLeft,height-Px(56),Px(40),Px(40),TRUE);
     MoveWindow(sidebarToggle,iconLeft,Px(Header+16),Px(40),Px(40),TRUE);
-    SetWindowTextW(sidebarToggle,sidebarExpanded?L"Collapse sidebar":L"Expand sidebar");
+    SetWindowTextW(sidebarToggle,sidebarWide?L"Collapse sidebar":L"Expand sidebar");
     int inputTop=layout.composer.top+attachmentHeight+(bodyHeight-inputHeight)/2;
     MoveWindow(input,left+Px(24),inputTop,inputWidth,inputHeight,TRUE);
     MoveWindow(clearAttachmentsButton,layout.composer.right-Px(48),layout.composer.top+Px(8),Px(32),Px(32),TRUE);
@@ -178,10 +179,6 @@ INT_PTR CALLBACK McpSettingsProc(HWND window,UINT message,WPARAM wParam,LPARAM) 
         control(L"BUTTON",L"Test connections",WS_TABSTOP,203,24,378,156,32);
         control(L"BUTTON",L"Example",WS_TABSTOP,204,192,378,100,32);
         control(L"BUTTON",L"Disable",WS_TABSTOP,205,300,378,84,32);
-        control(L"STATIC",L"Max model turns (1-100)",0,0,24,288,280,24);
-        control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,316,280,30);
-        control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,288,280,24);
-        control(L"EDIT",L"16",WS_TABSTOP|WS_BORDER|ES_NUMBER,109,336,316,280,30);
         control(L"BUTTON",L"Save",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,396,378,100,32);
         control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,378,110,32);
         nlohmann::json config={{"mcpServers",nlohmann::json::object()}};
@@ -288,6 +285,10 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         auto model=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWN|CBS_AUTOHSCROLL|WS_VSCROLL,103,24,192,592,180);
         (void)model;
         control(L"STATIC",L"Enter a provider URL to load available models.",0,104,24,234,592,52);
+        control(L"STATIC",L"Max model turns (1-100)",0,0,24,288,280,24);
+        control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,316,280,30);
+        control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,288,280,24);
+        control(L"EDIT",L"16",WS_TABSTOP|WS_BORDER|ES_NUMBER,109,336,316,280,30);
         control(L"BUTTON",L"Save",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,396,378,100,32);
         control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,378,110,32);
         chat::Config config;
@@ -430,10 +431,38 @@ INT_PTR CALLBACK ComputerSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
     }
     return FALSE;
 }
+INT_PTR CALLBACK SystemPromptSettingsProc(HWND window,UINT message,WPARAM wParam,LPARAM) {
+    if(message==WM_INITDIALOG) {
+        auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
+        auto control=[&](const wchar_t* type,const wchar_t* text,DWORD style,int id,int x,int y,int width,int height){
+            auto child=CreateWindowW(type,text,WS_CHILD|WS_VISIBLE|style,scale(x),scale(y),scale(width),scale(height),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
+            SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);return child;
+        };
+        control(L"STATIC",L"Edit the system instructions sent to the model. Saved changes apply to the next run.",0,0,24,20,592,40);
+        auto editor=control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,501,24,68,592,288);
+        SendMessageW(editor,EM_SETLIMITTEXT,32768,0);
+        chat::Config config;try{config=chat::LoadConfig(configDirectory,false);}catch(...){}
+        auto prompt=chat::Wide(config.systemPrompt);std::wstring display;
+        for(size_t i=0;i<prompt.size();++i){if(prompt[i]==L'\n'&&(i==0||prompt[i-1]!=L'\r'))display+=L'\r';display+=prompt[i];}
+        SetWindowTextW(editor,display.c_str());
+        control(L"BUTTON",L"Restore default",WS_TABSTOP,502,24,378,180,32);
+        control(L"BUTTON",L"Save",WS_TABSTOP,IDOK,396,378,100,32);
+        control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,378,110,32);
+        return TRUE;
+    }
+    if(message==WM_COMMAND) {
+        if(LOWORD(wParam)==502){SetDlgItemTextW(window,501,chat::Wide(chat::DefaultSystemPrompt()).c_str());return TRUE;}
+        if(LOWORD(wParam)==IDOK||LOWORD(wParam)==IDCANCEL){SendMessageW(GetParent(window),WM_COMMAND,LOWORD(wParam),0);return TRUE;}
+    }
+    if(message==WM_CTLCOLORDLG||message==WM_CTLCOLORSTATIC||message==WM_CTLCOLOREDIT) {
+        auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Surface);return reinterpret_cast<INT_PTR>(surfaceBrush);
+    }
+    return FALSE;
+}
 struct SettingsTabsState {
-    HWND provider=nullptr,mcp=nullptr,computer=nullptr;
+    HWND provider=nullptr,mcp=nullptr,computer=nullptr,prompt=nullptr;
     int selected=105;
-    std::wstring url,key,model,mcpText,modelTurns,toolCalls;
+    std::wstring url,key,model,mcpText,modelTurns,toolCalls,systemPrompt;
 };
 INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     auto state=reinterpret_cast<SettingsTabsState*>(GetWindowLongPtrW(window,DWLP_USER));
@@ -441,8 +470,8 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
         InitModalChrome(window,L"Settings",640,474);
         state=new SettingsTabsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
-        for(int id:{105,106,107}) {
-            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":L"Computer Control",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale((id-105)*640/3),scale(Header),scale((id-104)*640/3-(id-105)*640/3),scale(44),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
+        for(int id:{105,106,107,110}) {
+            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":id==107?L"Computer Control":L"System Prompt",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale((id==110?3:id-105)*160),scale(Header),scale(160),scale(44),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
             SetWindowLongPtrW(button,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
         }
         auto page=[&](DLGPROC proc) {
@@ -451,18 +480,19 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
             auto child=CreateDialogIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,window,proc,0);
             MoveWindow(child,0,scale(Header+44),scale(640),scale(430),TRUE);return child;
         };
-        state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);state->computer=page(ComputerSettingsProc);
-        if(!state->provider||!state->mcp||!state->computer){EndDialog(window,IDCANCEL);return TRUE;}
+        state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);state->computer=page(ComputerSettingsProc);state->prompt=page(SystemPromptSettingsProc);
+        if(!state->provider||!state->mcp||!state->computer||!state->prompt){EndDialog(window,IDCANCEL);return TRUE;}
         state->url=ControlText(state->provider,101);state->key=ControlText(state->provider,102);state->model=ControlText(state->provider,103);state->mcpText=ControlText(state->mcp,201);
+        state->systemPrompt=ControlText(state->prompt,501);
         state->modelTurns=ControlText(state->provider,108);state->toolCalls=ControlText(state->provider,109);
         ShowWindow(state->provider,SW_SHOW);ShowWindow(state->mcp,SW_HIDE);SetFocus(GetDlgItem(state->provider,101));return FALSE;
     }
     if(message==WM_COMMAND&&state) {
         int id=LOWORD(wParam);
-        if(id==105||id==106||id==107) {
-            state->selected=id;ShowWindow(state->provider,id==105?SW_SHOW:SW_HIDE);ShowWindow(state->mcp,id==106?SW_SHOW:SW_HIDE);ShowWindow(state->computer,id==107?SW_SHOW:SW_HIDE);
-            InvalidateRect(GetDlgItem(window,105),nullptr,TRUE);InvalidateRect(GetDlgItem(window,106),nullptr,TRUE);InvalidateRect(GetDlgItem(window,107),nullptr,TRUE);
-            SetFocus(GetDlgItem(id==105?state->provider:id==106?state->mcp:state->computer,id==105?101:id==106?201:401));return TRUE;
+        if(id==105||id==106||id==107||id==110) {
+            state->selected=id;ShowWindow(state->provider,id==105?SW_SHOW:SW_HIDE);ShowWindow(state->mcp,id==106?SW_SHOW:SW_HIDE);ShowWindow(state->computer,id==107?SW_SHOW:SW_HIDE);ShowWindow(state->prompt,id==110?SW_SHOW:SW_HIDE);
+            InvalidateRect(GetDlgItem(window,105),nullptr,TRUE);InvalidateRect(GetDlgItem(window,106),nullptr,TRUE);InvalidateRect(GetDlgItem(window,107),nullptr,TRUE);InvalidateRect(GetDlgItem(window,110),nullptr,TRUE);
+            SetFocus(GetDlgItem(id==105?state->provider:id==106?state->mcp:id==107?state->computer:state->prompt,id==105?101:id==106?201:id==107?401:501));return TRUE;
         }
         if(id==IDCANCEL){EndDialog(window,IDCANCEL);return TRUE;}
         if(id==IDOK) {
@@ -475,12 +505,13 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                 };
                 int turns=limit(modelTurns,100,"Maximum model turns must be between 1 and 100.");
                 int calls=limit(toolCalls,1000,"Maximum tool calls must be between 1 and 1000.");
-                bool providerChanged=url!=state->url||key!=state->key||model!=state->model||modelTurns!=state->modelTurns||toolCalls!=state->toolCalls;
+                auto systemPrompt=ControlText(state->prompt,501);
+                bool providerChanged=url!=state->url||key!=state->key||model!=state->model||modelTurns!=state->modelTurns||toolCalls!=state->toolCalls||systemPrompt!=state->systemPrompt;
                 auto mcp=nlohmann::json::parse(chat::Utf8(mcpText),nullptr,false);
                 if(mcp.is_discarded())throw std::runtime_error("Invalid MCP JSON. Check quotes, commas, and braces.");
                 chat::ValidateMcpConfig(mcp);
                 chat::Config config;config.url=chat::Utf8(url);config.key=chat::Utf8(key);config.model=chat::Utf8(model);
-                config.maxModelTurns=turns;config.maxToolCalls=calls;
+                config.maxModelTurns=turns;config.maxToolCalls=calls;config.systemPrompt=chat::Utf8(systemPrompt);
                 if(providerChanged||state->selected==105)chat::ValidateConfig(config);
                 if(providerChanged||state->selected==105)chat::SaveConfig(configDirectory,config);
                 if(mcpText!=state->mcpText||state->selected==106)chat::SaveMcpConfig(configDirectory,mcp);
@@ -489,11 +520,11 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
             return TRUE;
         }
     }
-    if(message==WM_DRAWITEM&&state&&(wParam==105||wParam==106||wParam==107)) {
+    if(message==WM_DRAWITEM&&state&&(wParam==105||wParam==106||wParam==107||wParam==110)) {
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);bool selected=state->selected==static_cast<int>(item.CtlID);
         POINT point{};GetCursorPos(&point);ScreenToClient(item.hwndItem,&point);
         Fill(item.hDC,item.rcItem,selected?Surface:PtInRect(&item.rcItem,point)?RGB(40,40,40):Panel);
-        Text(item.hDC,item.CtlID==105?L"Provider":item.CtlID==106?L"MCP":L"Computer Control",item.rcItem,labelFont,selected?Ink:Muted,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
+        Text(item.hDC,item.CtlID==105?L"Provider":item.CtlID==106?L"MCP":item.CtlID==107?L"Computer Control":L"System Prompt",item.rcItem,labelFont,selected?Ink:Muted,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
         Line(item.hDC,item.rcItem.left,item.rcItem.bottom-1,item.rcItem.right,item.rcItem.bottom-1,selected?RGB(110,110,110):Border);
         if(item.CtlID==105)Line(item.hDC,item.rcItem.right-1,item.rcItem.top,item.rcItem.right-1,item.rcItem.bottom);
         return TRUE;
@@ -702,10 +733,10 @@ void Paint(HDC dc) {
     Line(dc,0,Px(Header)-1,r.client.right,Px(Header)-1);
     Line(dc,sideWidth,Px(Header),sideWidth,r.client.bottom);
     int sectionTop=Px(Header+72+56+32);
-    if(sidebarExpanded)Text(dc,L"CURRENT CHAT",{Px(Space+16),sectionTop,sideWidth-Px(Space+16),sectionTop+Px(20)},labelFont,Muted,DT_SINGLELINE|DT_NOPREFIX);
+    if(sidebarWide)Text(dc,L"CURRENT CHAT",{Px(Space+16),sectionTop,sideWidth-Px(Space+16),sectionTop+Px(20)},labelFont,Muted,DT_SINGLELINE|DT_NOPREFIX);
     std::wstring label=messages.empty()?L"New conversation":messages.front().text;
     std::replace(label.begin(),label.end(),L'\n',L' ');std::replace(label.begin(),label.end(),L'\r',L' ');
-    if(sidebarExpanded)Text(dc,label,{Px(Space+16),sectionTop+Px(28),sideWidth-Px(Space+16),sectionTop+Px(52)},bodyFont,Ink,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    if(sidebarWide)Text(dc,label,{Px(Space+16),sectionTop+Px(28),sideWidth-Px(Space+16),sectionTop+Px(52)},bodyFont,Ink,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
     SaveDC(dc);IntersectClipRect(dc,r.conversation.left,r.conversation.top,r.conversation.right,r.conversation.bottom);
     if(messages.empty()) {
         int top=r.conversation.top;
@@ -760,9 +791,9 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     } else if(toggle) {
         Text(dc,item.CtlID==2?L"\uf3e5":L"\uf45d",rect,navIconFont,Ink,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
     } else if(!caption) {
-        RECT icon=sidebarExpanded?RECT{Px(Space),0,Px(Space+20),rect.bottom}:rect;
+        RECT icon=sidebarWide?RECT{Px(Space),0,Px(Space+20),rect.bottom}:rect;
         Text(dc,L"\uf64d",icon,navIconFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_CENTER|DT_NOPREFIX);
-        if(sidebarExpanded)Text(dc,L"New chat",{Px(Space+32),0,rect.right-Px(Space),rect.bottom},bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+        if(sidebarWide)Text(dc,L"New chat",{Px(Space+32),0,rect.right-Px(Space),rect.bottom},bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
         Line(dc,rect.left,rect.bottom-1,rect.right,rect.bottom-1,Border);
         Line(dc,rect.right-1,rect.top,rect.right-1,rect.bottom,Border);
     } else {
@@ -903,7 +934,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         SetWindowPos(window,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);Layout();return 0;
     }
     case WM_SIZE:Layout();return 0;
-    case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize={Px(720),Px(540)};return 0;
+    case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize={Px(360),Px(540)};return 0;
     case WM_COMMAND:
         if(LOWORD(wParam)==6&&HIWORD(wParam)==BN_CLICKED){pendingAttachments.clear();Layout();SetFocus(input);return 0;}
         if(LOWORD(wParam)==4){sidebarExpanded=!sidebarExpanded;Layout();return 0;}
@@ -915,7 +946,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(notification->hwndFrom==navTooltips&&notification->code==TTN_GETDISPINFOW) {
             auto info=reinterpret_cast<NMTTDISPINFOW*>(lParam);
             auto control=reinterpret_cast<HWND>(info->hdr.idFrom);
-            info->lpszText=const_cast<wchar_t*>(control==clearAttachmentsButton?L"Remove attachments":control==sendButton?(busy?L"Stop agent":L"Send message"):control==sidebarToggle?(sidebarExpanded?L"Collapse sidebar (Ctrl+B)":L"Expand sidebar (Ctrl+B)"):control==settingsButton?L"Settings":L"New chat");
+            info->lpszText=const_cast<wchar_t*>(control==clearAttachmentsButton?L"Remove attachments":control==sendButton?(busy?L"Stop agent":L"Send message"):control==sidebarToggle?(sidebarWide?L"Collapse sidebar (Ctrl+B)":L"Expand sidebar (Ctrl+B)"):control==settingsButton?L"Settings":L"New chat");
             return 0;
         }
         break;

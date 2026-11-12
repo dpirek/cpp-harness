@@ -4,10 +4,12 @@
 #include <vector>
 
 namespace chat {
+std::string DefaultSystemPrompt();
 struct Config {
     std::string key;
     std::string model = "openrouter/auto";
     std::string url = "https://openrouter.ai/api/v1/chat/completions";
+    std::string systemPrompt = DefaultSystemPrompt();
     int maxModelTurns = 8;
     int maxToolCalls = 16;
     std::vector<std::string> extraTools; // Runtime tool definitions; never persisted.
