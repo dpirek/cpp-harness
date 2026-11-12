@@ -1,4 +1,4 @@
-﻿// Loopback-only fixtures. No credentials or public network access required.
+// Loopback-only fixtures. No credentials or public network access required.
 const http = require('node:http');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
@@ -11,7 +11,7 @@ const server = http.createServer((req, res) => {
     if(req.method==='GET') {
       if(req.url==='/keyless/models') {res.writeHead(req.headers.authorization===undefined?200:400);res.end('{"data":[{"id":"local-model"}]}');return;}
       if(req.headers.authorization!=='Bearer test-key'){res.writeHead(401).end();return;}
-      if(req.url==='/v1/models'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'z/model'},{id:'a/model'},{id:'z/model'},{id:''},{name:'invalid'}]}));return;}
+      if(req.url==='/v1/models'||req.url==='/v1/models?version=required'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'z/model'},{id:'a/model'},{id:'z/model'},{id:''},{name:'invalid'}]}));return;}
       if(req.url==='/invalid/models'){res.end('{broken');return;}
       if(req.url==='/empty/models'){res.end('{"data":[]}');return;}
       if(req.url==='/slow/models'){setTimeout(()=>res.end('{"data":[{"id":"slow"}]}'),1500);return;}

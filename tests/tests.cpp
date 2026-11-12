@@ -1,3 +1,4 @@
+#include "client/model_list.h"
 #include "config/chat_history.h"
 #include "client/chat_client.h"
 #include "app/chat_worker.h"
@@ -265,6 +266,15 @@ int main(int argc,char** argv) {
             Config provider=config;provider.url="http://127.0.0.1:"+std::string(argv[1])+"/v1/chat/completions";
             Cancellation modelCancel;auto models=FetchModels(provider,modelCancel);
             Check(models==std::vector<std::string>({"a/model","z/model"}),"Authenticated provider model discovery sorted and deduplicated");
+            Check(ParseModelList("{\"models\":[null,{},42,{\"model\":\"local\"},\"other\",\"other\",\"bad\\u0000id\",\" \"]}")==std::vector<std::string>({"local","other"}),"Alternate model lists skip invalid IDs and deduplicate");
+            Check(ParseModelList("\xef\xbb\xbf[\"unicode-\xc3\xa9\"]").size()==1,"Model parser accepts BOM and Unicode IDs");
+            for(auto body:{"null","{}","{\"data\":{}}","{broken","{\"data\":[]}","{\"error\":\"failed\",\"data\":[\"hidden\"]}"}) {
+                bool failed=false;try{ParseModelList(body);}catch(const std::exception&){failed=true;}Check(failed,"Invalid model responses report useful errors");
+            }
+            Check(ModelHttpError(422).find("query parameters")!=std::string::npos,"HTTP 422 explains validation and endpoint requirements");
+            Check(ModelErrorDetail(R"({"detail":[{"msg":"Invalid test-key parameter","input":"secret"}]})","test-key")=="Invalid [redacted] parameter","Structured validation errors redact keys and omit request inputs");
+            auto queryProvider=provider;queryProvider.url+="?version=required";
+            Check(FetchModels(queryProvider,modelCancel)==models,"Model discovery preserves query parameters");
             auto local=provider;local.key.clear();local.url="http://127.0.0.1:"+std::string(argv[1])+"/keyless/";
             Check(FetchModels(local,modelCancel)==std::vector<std::string>({"local-model"}),"Keyless base URL discovery omits authorization");
             Check(Complete(local,history,modelCancel).ok,"Keyless base URL inference omits authorization");

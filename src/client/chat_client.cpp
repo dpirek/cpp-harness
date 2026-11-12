@@ -1,3 +1,4 @@
+#include "client/model_list.h"
 #include "tools/computer_tool.h"
 #include "client/chat_client.h"
 #include "common/text_encoding.h"
@@ -271,12 +272,14 @@ std::string McpHttpPost(const std::string& url,const std::vector<std::pair<std::
 std::vector<std::string> FetchModels(const Config& config,const Cancellation& cancel) {
     ValidateConfig(config);
     auto endpoint=InferenceEndpoint(config.url);
-    auto query=endpoint.path.find(L'?');if(query!=std::wstring::npos)endpoint.path.resize(query);
+    auto query=endpoint.path.find(L'?');
+    auto queryString=query==std::wstring::npos?L"":endpoint.path.substr(query);
+    if(query!=std::wstring::npos)endpoint.path.resize(query);
     const std::wstring suffix=L"/chat/completions";
     if(endpoint.path.size()>=suffix.size()&&endpoint.path.compare(endpoint.path.size()-suffix.size(),suffix.size(),suffix)==0)
         endpoint.path.resize(endpoint.path.size()-suffix.size());
     else throw std::runtime_error("Use a URL ending in /chat/completions to load models.");
-    endpoint.path+=L"/models";
+    endpoint.path+=L"/models"+queryString;
     HttpHandle session(WinHttpOpen(L"NativeCodexHarness/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,WINHTTP_FLAG_ASYNC));
     WinHttpSetTimeouts(session.value,10000,10000,10000,15000);
     HttpHandle connection(WinHttpConnect(session.value,endpoint.host.c_str(),endpoint.port,0));
@@ -297,20 +300,11 @@ std::vector<std::string> FetchModels(const Config& config,const Cancellation& ca
         request.Begin(cancel);request.Wait(WinHttpReceiveResponse(request.handle,nullptr),cancel,deadline);
         DWORD status=0,size=sizeof(status);
         if(!WinHttpQueryHeaders(request.handle,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&size,WINHTTP_NO_HEADER_INDEX))AsyncRequest::Fail(GetLastError());
-        if(status<200||status>=300)throw std::runtime_error("Could not load models (HTTP "+std::to_string(status)+"). Check the URL and API key.");
+
         std::string body;
         for(;;){request.Begin(cancel);request.Wait(WinHttpReadData(request.handle,request.buffer.data(),static_cast<DWORD>(request.buffer.size()),nullptr),cancel,deadline);if(!request.bytes)break;body.append(request.buffer.data(),request.bytes);if(body.size()>4*1024*1024)throw std::runtime_error("The model list is too large.");}
-        std::vector<std::string> models;
-        try {
-            auto json=Json::parse(body);auto& data=json.at("data");if(!data.is_array())throw std::runtime_error("models");
-            for(const auto& item:data)if(item.is_object()&&item.contains("id")&&item["id"].is_string()) {
-                auto id=item["id"].get<std::string>();
-                if(!id.empty()&&id.size()<=512&&id.find_first_of("\r\n\t")==id.npos){Wide(id);models.push_back(std::move(id));}
-            }
-        }catch(...){throw std::runtime_error("The provider returned an invalid model list.");}
-        std::sort(models.begin(),models.end());models.erase(std::unique(models.begin(),models.end()),models.end());
-        if(models.empty())throw std::runtime_error("The provider returned no models. You can enter a model ID manually.");
-        return models;
+        if(status<200||status>=300){auto detail=ModelErrorDetail(body,config.key);throw std::runtime_error(ModelHttpError(status)+(detail.empty()?"":" Provider: "+detail));}
+        return ParseModelList(body);
     }catch(const Cancelled&){throw std::runtime_error("Model loading cancelled.");}
 }
 Reply Complete(const Config& config, const std::vector<Message>& messages, const Cancellation& cancel, const Endpoint& overrideEndpoint, const OnDelta& onDelta) {

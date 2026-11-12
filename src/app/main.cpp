@@ -476,7 +476,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         control(L"STATIC",L"Model",0,0,24,164,592,24);
         auto model=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWN|CBS_AUTOHSCROLL|WS_VSCROLL,103,24,192,592,180);
         (void)model;
-        control(L"STATIC",L"Enter a provider URL to load available models.",0,104,24,234,592,52);
+        control(L"EDIT",L"Enter a provider URL to load available models.",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,104,24,234,592,52);
         control(L"STATIC",L"Max model turns (1-100)",0,0,24,288,280,24);
         control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,316,280,30);
         control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,288,280,24);
@@ -488,7 +488,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         SetDlgItemTextW(window,101,chat::Wide(config.url).c_str());SetDlgItemTextW(window,102,chat::Wide(config.key).c_str());SetDlgItemTextW(window,103,chat::Wide(config.model).c_str());
         SetDlgItemInt(window,108,config.maxModelTurns,FALSE);SetDlgItemInt(window,109,config.maxToolCalls,FALSE);
         state=new SettingsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
-        if(!config.key.empty())QueueModels(window,*state);
+        if(!config.url.empty())QueueModels(window,*state);
         SetFocus(GetDlgItem(window,101));return FALSE;
     }
     if(message==WM_TIMER&&wParam==1&&state) {
@@ -651,6 +651,29 @@ INT_PTR CALLBACK SystemPromptSettingsProc(HWND window,UINT message,WPARAM wParam
     }
     return FALSE;
 }
+void DrawButton(const DRAWITEMSTRUCT& item);
+LRESULT CALLBACK SettingsEditProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    if(message==WM_KEYDOWN&&(GetKeyState(VK_CONTROL)&0x8000)&&!(GetKeyState(VK_MENU)&0x8000)) {
+        UINT action=wParam=='A'?EM_SETSEL:wParam=='C'?WM_COPY:wParam=='X'?WM_CUT:wParam=='V'?WM_PASTE:wParam=='Z'?WM_UNDO:0;
+        if(action){SendMessageW(window,action,0,wParam=='A'?-1:0);return 0;}
+    }
+    if(message==WM_CHAR&&(GetKeyState(VK_CONTROL)&0x8000)&&(wParam==1||wParam==3||wParam==22||wParam==24||wParam==26))return 0;
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsEditProc,1);
+    return DefSubclassProc(window,message,wParam,lParam);
+}
+LRESULT CALLBACK SettingsPageProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    if(message==WM_DRAWITEM){
+        auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+        Fill(item.hDC,item.rcItem,Surface);
+        POINT pointer{};GetCursorPos(&pointer);bool hover=WindowFromPoint(pointer)==item.hwndItem;
+        Round(item.hDC,item.rcItem,(item.itemState&ODS_SELECTED)?RGB(62,62,62):hover?RGB(47,47,47):Panel,Px(6));
+        Text(item.hDC,ControlText(window,item.CtlID),item.rcItem,bodyFont,(item.itemState&ODS_DISABLED)?Muted:Ink,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        if(item.itemState&ODS_FOCUS){auto focus=item.rcItem;InflateRect(&focus,-3,-3);DrawFocusRect(item.hDC,&focus);}
+        return TRUE;
+    }
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsPageProc,1);
+    return DefSubclassProc(window,message,wParam,lParam);
+}
 struct SettingsTabsState {
     HWND provider=nullptr,mcp=nullptr,computer=nullptr,prompt=nullptr;
     int selected=105;
@@ -671,12 +694,28 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
             dialog.dialog.style=WS_CHILD|WS_CLIPCHILDREN|DS_CONTROL;dialog.dialog.dwExtendedStyle=WS_EX_CONTROLPARENT;dialog.dialog.cx=400;dialog.dialog.cy=270;
             auto child=CreateDialogIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,window,proc,0);
             if(!child)return child;
+            SetWindowSubclass(child,SettingsPageProc,1,0);
             // Enlarge every settings page while retaining the normal readable font size.
             EnumChildWindows(child,[](HWND control,LPARAM parent)->BOOL {
                 auto page=reinterpret_cast<HWND>(parent);if(GetParent(control)!=page)return TRUE;
                 RECT rect{};GetWindowRect(control,&rect);
                 wchar_t type[32]{};GetClassNameW(control,type,32);
                 if(lstrcmpiW(type,L"COMBOBOX")==0)SendMessageW(control,CB_GETDROPPEDCONTROLRECT,0,reinterpret_cast<LPARAM>(&rect));
+                if(lstrcmpiW(type,L"BUTTON")==0) {
+                    auto style=GetWindowLongPtrW(control,GWL_STYLE);
+                    SetWindowLongPtrW(control,GWL_STYLE,(style&~BS_TYPEMASK)|BS_OWNERDRAW);
+                    SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
+                }
+                if(lstrcmpiW(type,L"EDIT")==0) {
+                    SetWindowSubclass(control,SettingsEditProc,1,0);
+                    SetWindowLongPtrW(control,GWL_EXSTYLE,GetWindowLongPtrW(control,GWL_EXSTYLE)&~WS_EX_CLIENTEDGE);
+                    SetWindowLongPtrW(control,GWL_STYLE,GetWindowLongPtrW(control,GWL_STYLE)|WS_BORDER|ES_NOHIDESEL);
+                    SetWindowPos(control,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);
+                }
+                if(lstrcmpiW(type,L"COMBOBOX")==0) {
+                    COMBOBOXINFO info{sizeof(info)};
+                    if(GetComboBoxInfo(control,&info)&&info.hwndItem)SetWindowSubclass(info.hwndItem,SettingsEditProc,1,0);
+                }
                 MapWindowPoints(nullptr,page,reinterpret_cast<POINT*>(&rect),2);
                 MoveWindow(control,MulDiv(rect.left,3,2),MulDiv(rect.top,3,2),MulDiv(rect.right-rect.left,3,2),MulDiv(rect.bottom-rect.top,3,2),TRUE);
                 return TRUE;
