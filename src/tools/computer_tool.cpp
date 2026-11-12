@@ -1,5 +1,5 @@
 #define NOMINMAX
-#include "computer_tool.h"
+#include "tools/computer_tool.h"
 #include <gdiplus.h>
 #include <objidl.h>
 #include <algorithm>
@@ -78,18 +78,52 @@ ComputerResult RunComputer(const Json& args,const Cancellation& cancel) {
         }
         int x=GetSystemMetrics(SM_XVIRTUALSCREEN),y=GetSystemMetrics(SM_YVIRTUALSCREEN),w=GetSystemMetrics(SM_CXVIRTUALSCREEN),h=GetSystemMetrics(SM_CYVIRTUALSCREEN);
         auto point=[&](const char* a,const char* b){Require(args.contains(a)&&args.contains(b),"Coordinates are required.");int px=args.at(a).get<int>(),py=args.at(b).get<int>();Require(px>=x&&py>=y&&px<x+w&&py<y+h,"Coordinates are outside the desktop.");return POINT{px,py};};
-        auto move=[&](POINT p){Require(SetCursorPos(p.x,p.y)!=0,"Could not move the pointer.");};
+        auto move=[&](POINT p){
+            INPUT input{};input.type=INPUT_MOUSE;
+            input.mi.dx=static_cast<LONG>((static_cast<long long>(p.x-x)*65536+32768)/w);
+            input.mi.dy=static_cast<LONG>((static_cast<long long>(p.y-y)*65536+32768)/h);
+            input.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK;Send(input);
+            // SendInput queues movement. Confirm it landed before clicking or returning success.
+            POINT actual{};
+            for(int attempt=0;attempt<5;++attempt){
+                if(GetCursorPos(&actual)&&actual.x==p.x&&actual.y==p.y)return;
+                Sleep(10);
+            }
+            Require(SetCursorPos(p.x,p.y)!=0,"Windows blocked pointer movement. Check the input desktop and any application confining the cursor.");
+            Require(GetCursorPos(&actual)&&actual.x==p.x&&actual.y==p.y,"Pointer did not reach the requested position. Another application may be confining or moving it.");
+        };
         auto action=args["action"].get<std::string>();
         if(action=="screenshot") {result.screenshot=Capture(x,y,w,h);result.output={{"left",x},{"top",y},{"width",w},{"height",h},{"coordinates","physical desktop pixels"}};}
         else if(action=="wait") {int ms=args.value("milliseconds",300);Require(ms>=0&&ms<=5000,"milliseconds must be 0 to 5000.");WaitForSingleObject(cancel.Event(),ms);}
         else if(action=="type") {
             Require(args.contains("text"),"text is required.");auto text=Wide(args.at("text").get<std::string>());Require(text.size()<=4096,"text exceeds 4096 UTF-16 units.");
-            for(auto c:text){if(cancel.IsCancelled())break;Key(c,false,true);Key(c,true,true);}
+            for(auto c:text){
+                if(cancel.IsCancelled())break;
+                INPUT pair[2]{};
+                for(auto& event:pair){event.type=INPUT_KEYBOARD;event.ki.wScan=c;event.ki.dwFlags=KEYEVENTF_UNICODE;}
+                pair[1].ki.dwFlags|=KEYEVENTF_KEYUP;
+                auto sent=SendInput(2,pair,sizeof(INPUT));
+                if(sent==1)try{Key(c,true,true);}catch(...){}
+                Require(sent==2,"Windows rejected text input. Keep the desktop unlocked and use a target running at the same privilege level as Chat.");
+            }
         } else if(action=="key") {
-            Require(args.contains("keys")&&args["keys"].size()>0&&args["keys"].size()<=8,"Provide 1 to 8 keys.");std::vector<WORD> codes,held;
+            Require(args.contains("keys")&&args["keys"].size()>0&&args["keys"].size()<=8,"Provide 1 to 8 keys.");std::vector<WORD> codes;
             for(auto& name:args["keys"]){Require(name.is_string(),"Key names must be strings.");codes.push_back(KeyCode(name.get<std::string>()));}
-            try{for(auto code:codes){Key(code,false);held.push_back(code);}}catch(...){for(auto it=held.rbegin();it!=held.rend();++it)try{Key(*it,true);}catch(...){}throw;}
-            bool released=true;for(auto it=held.rbegin();it!=held.rend();++it)try{Key(*it,true);}catch(...){released=false;}Require(released,"Windows rejected key release.");
+            std::vector<INPUT> events;
+            auto append=[&](WORD code,bool up){
+                INPUT event{};event.type=INPUT_KEYBOARD;event.ki.wVk=code;
+                event.ki.wScan=static_cast<WORD>(MapVirtualKeyW(code,MAPVK_VK_TO_VSC));
+                event.ki.dwFlags=up?KEYEVENTF_KEYUP:0;
+                if(code==VK_LWIN||code==VK_DELETE||(code>=VK_PRIOR&&code<=VK_DOWN))event.ki.dwFlags|=KEYEVENTF_EXTENDEDKEY;
+                events.push_back(event);
+            };
+            for(auto code:codes)append(code,false);
+            for(auto it=codes.rbegin();it!=codes.rend();++it)append(*it,true);
+            auto sent=SendInput(static_cast<UINT>(events.size()),events.data(),sizeof(INPUT));
+            if(sent!=events.size()) {
+                for(auto it=codes.rbegin();it!=codes.rend();++it)try{Key(*it,true);}catch(...){}
+                throw std::runtime_error("Windows rejected the key chord. The target may be elevated or on a secure desktop.");
+            }
         } else if(action=="scroll") {Require(args.contains("delta"),"delta is required.");int delta=args.at("delta").get<int>();Require(delta>=-20&&delta<=20,"delta must be -20 to 20.");Mouse(MOUSEEVENTF_WHEEL,static_cast<DWORD>(delta*WHEEL_DELTA));}
         else if(action=="move"||action=="click"||action=="double_click"||action=="drag") {
             POINT start=point("x","y"),end=start;if(action=="drag")end=point("to_x","to_y");

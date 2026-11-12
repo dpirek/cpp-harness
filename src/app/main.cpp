@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <commctrl.h>
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -12,13 +13,14 @@
 #include <future>
 #include <map>
 #include <shellapi.h>
-#include "markdown.h"
+#include "ui/markdown.h"
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"comctl32.lib")
-#include "chat_worker.h"
-#include "code_format.h"
-#include "text_encoding.h"
-#include "mcp_client.h"
+#include "app/chat_worker.h"
+#include "ui/code_format.h"
+#include "common/text_encoding.h"
+#include "tools/mcp_client.h"
+#include "tools/computer_tool.h"
 
 namespace {
 constexpr COLORREF Background=RGB(24,24,24), Panel=RGB(31,31,31), Surface=RGB(36,36,36);
@@ -176,6 +178,10 @@ INT_PTR CALLBACK McpSettingsProc(HWND window,UINT message,WPARAM wParam,LPARAM) 
         control(L"BUTTON",L"Test connections",WS_TABSTOP,203,24,378,156,32);
         control(L"BUTTON",L"Example",WS_TABSTOP,204,192,378,100,32);
         control(L"BUTTON",L"Disable",WS_TABSTOP,205,300,378,84,32);
+        control(L"STATIC",L"Max model turns (1-100)",0,0,24,288,280,24);
+        control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,316,280,30);
+        control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,288,280,24);
+        control(L"EDIT",L"16",WS_TABSTOP|WS_BORDER|ES_NUMBER,109,336,316,280,30);
         control(L"BUTTON",L"Save",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,396,378,100,32);
         control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,378,110,32);
         nlohmann::json config={{"mcpServers",nlohmann::json::object()}};
@@ -287,6 +293,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         chat::Config config;
         try{config=chat::LoadConfig(configDirectory,false);}catch(...){ShowModalMessage(window,L"Saved settings could not be loaded. Enter the provider details to replace them.",L"Settings",MB_OK|MB_ICONINFORMATION);}
         SetDlgItemTextW(window,101,chat::Wide(config.url).c_str());SetDlgItemTextW(window,102,chat::Wide(config.key).c_str());SetDlgItemTextW(window,103,chat::Wide(config.model).c_str());
+        SetDlgItemInt(window,108,config.maxModelTurns,FALSE);SetDlgItemInt(window,109,config.maxToolCalls,FALSE);
         state=new SettingsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         if(!config.key.empty())QueueModels(window,*state);
         SetFocus(GetDlgItem(window,101));return FALSE;
@@ -331,10 +338,102 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
     }
     return FALSE;
 }
+struct MouseCircleTest { POINT origin{},center{}; int radius=0,step=0; };
+// Exercise the production tool against a local field and verify input delivery.
+INT_PTR CALLBACK ComputerSettingsProc(HWND window,UINT message,WPARAM wParam,LPARAM) {
+    if(message==WM_INITDIALOG) {
+        auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
+        auto control=[&](const wchar_t* type,const wchar_t* text,DWORD style,int id,int x,int y,int width,int height){
+            auto child=CreateWindowW(type,text,WS_CHILD|WS_VISIBLE|style,scale(x),scale(y),scale(width),scale(height),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
+            SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);return child;
+        };
+        control(L"STATIC",L"Computer control",0,0,24,20,592,28);
+        control(L"STATIC",L"Test mouse clicks, keyboard input, and screenshot access. The test clicks and types in the field below.",0,0,24,60,592,52);
+        control(L"EDIT",L"",WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,402,24,128,592,32);
+        control(L"BUTTON",L"Test access",WS_TABSTOP,401,24,180,160,32);
+        control(L"BUTTON",L"Test mouse circle",WS_TABSTOP,404,200,180,220,32);
+        control(L"STATIC",L"Not tested. Keep the desktop unlocked. Elevated apps and secure Windows screens can block control.",0,403,24,230,592,120);
+        control(L"BUTTON",L"Save",WS_TABSTOP,IDOK,396,378,100,32);
+        control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,378,110,32);
+        return TRUE;
+    }
+    if(message==WM_COMMAND&&LOWORD(wParam)==404&&HIWORD(wParam)==BN_CLICKED) {
+        if(GetForegroundWindow()!=GetAncestor(window,GA_ROOT))return TRUE;
+        auto state=new MouseCircleTest;
+        if(!GetCursorPos(&state->origin)){delete state;SetDlgItemTextW(window,403,L"Could not read the mouse position.");return TRUE;}
+        RECT rect{};GetWindowRect(window,&rect);
+        state->center={(rect.left+rect.right)/2,(rect.top+rect.bottom)/2};
+        state->radius=MulDiv(80,GetDpiForWindow(window),96);
+        SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
+        EnableWindow(GetDlgItem(window,401),FALSE);EnableWindow(GetDlgItem(window,404),FALSE);
+        SetDlgItemTextW(window,403,L"Moving the mouse in a circle for three seconds. No clicks are sent.");
+        SetTimer(window,5,25,nullptr);return TRUE;
+    }
+    if(message==WM_TIMER&&wParam==5) {
+        auto state=reinterpret_cast<MouseCircleTest*>(GetWindowLongPtrW(window,DWLP_USER));
+        if(!state)return TRUE;
+        bool active=IsWindowVisible(window)&&GetForegroundWindow()==GetAncestor(window,GA_ROOT);
+        double angle=state->step*6.283185307179586/120;
+        POINT target{state->center.x+static_cast<LONG>(std::lround(state->radius*std::cos(angle))),state->center.y+static_cast<LONG>(std::lround(state->radius*std::sin(angle)))};
+        chat::Cancellation cancel;
+        auto result=active?chat::RunComputer({{"action","move"},{"x",target.x},{"y",target.y}},cancel):chat::ComputerResult{};
+        bool failed=result.output.contains("error");
+        if(!active||failed||++state->step>120) {
+            KillTimer(window,5);
+            auto status=!active?std::wstring(L"Mouse circle stopped because Settings lost focus."):failed?L"Mouse movement failed: "+chat::Wide(result.output["error"].get<std::string>()):std::wstring(L"Mouse circle passed: pointer positions verified throughout the circle.");
+            if(active)chat::RunComputer({{"action","move"},{"x",state->origin.x},{"y",state->origin.y}},cancel);
+            SetDlgItemTextW(window,403,status.c_str());
+            SetWindowLongPtrW(window,DWLP_USER,0);delete state;
+            EnableWindow(GetDlgItem(window,401),TRUE);EnableWindow(GetDlgItem(window,404),TRUE);
+        }
+        return TRUE;
+    }
+    if(message==WM_COMMAND&&LOWORD(wParam)==401&&HIWORD(wParam)==BN_CLICKED) {
+        if(GetForegroundWindow()!=GetAncestor(window,GA_ROOT)) {
+            SetDlgItemTextW(window,403,L"Keep Settings in the foreground, then test again.");return TRUE;
+        }
+        SetDlgItemTextW(window,402,L"");EnableWindow(GetDlgItem(window,401),FALSE);EnableWindow(GetDlgItem(window,404),FALSE);
+        SetDlgItemTextW(window,403,L"Testing mouse and keyboard delivery...");
+        RECT rect{};GetWindowRect(GetDlgItem(window,402),&rect);
+        chat::Cancellation cancel;
+        auto result=chat::RunComputer({{"action","click"},{"x",(rect.left+rect.right)/2},{"y",(rect.top+rect.bottom)/2}},cancel);
+        if(result.output.contains("error")) {
+            SetDlgItemTextW(window,403,chat::Wide(result.output["error"].get<std::string>()).c_str());EnableWindow(GetDlgItem(window,401),TRUE);EnableWindow(GetDlgItem(window,404),TRUE);
+        } else SetTimer(window,3,150,nullptr);
+        return TRUE;
+    }
+    if(message==WM_TIMER&&wParam==3) {
+        KillTimer(window,3);
+        if(!IsWindowVisible(window)||GetForegroundWindow()!=GetAncestor(window,GA_ROOT)||GetFocus()!=GetDlgItem(window,402)) {
+            SetDlgItemTextW(window,403,L"Mouse test failed: the test field did not receive the click. Keep Settings in the foreground and retry.");EnableWindow(GetDlgItem(window,401),TRUE);EnableWindow(GetDlgItem(window,404),TRUE);return TRUE;
+        }
+        chat::Cancellation cancel;auto result=chat::RunComputer({{"action","type"},{"text","Computer control OK"}},cancel);
+        if(result.output.contains("error")) {
+            SetDlgItemTextW(window,403,chat::Wide(result.output["error"].get<std::string>()).c_str());EnableWindow(GetDlgItem(window,401),TRUE);EnableWindow(GetDlgItem(window,404),TRUE);
+        } else SetTimer(window,4,150,nullptr);
+        return TRUE;
+    }
+    if(message==WM_TIMER&&wParam==4) {
+        KillTimer(window,4);
+        if(ControlText(window,402)!=L"Computer control OK")SetDlgItemTextW(window,403,L"Mouse passed. Keyboard test failed: expected text was not received. Release modifier keys and retry.");
+        else {
+            chat::Cancellation cancel;auto capture=chat::RunComputer({{"action","screenshot"}},cancel);
+            auto text=capture.output.contains("error")?L"Mouse and keyboard passed. Screenshot failed: "+chat::Wide(capture.output["error"].get<std::string>()):std::wstring(L"Access works: mouse click, keyboard input, and screenshot capture passed. Elevated apps may still block input.");
+            SetDlgItemTextW(window,403,text.c_str());
+        }
+        EnableWindow(GetDlgItem(window,401),TRUE);EnableWindow(GetDlgItem(window,404),TRUE);return TRUE;
+    }
+    if(message==WM_COMMAND&&(LOWORD(wParam)==IDOK||LOWORD(wParam)==IDCANCEL)){SendMessageW(GetParent(window),WM_COMMAND,LOWORD(wParam),0);return TRUE;}
+    if(message==WM_DESTROY){KillTimer(window,3);KillTimer(window,4);KillTimer(window,5);delete reinterpret_cast<MouseCircleTest*>(GetWindowLongPtrW(window,DWLP_USER));SetWindowLongPtrW(window,DWLP_USER,0);}
+    if(message==WM_CTLCOLORDLG||message==WM_CTLCOLORSTATIC||message==WM_CTLCOLOREDIT) {
+        auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Surface);return reinterpret_cast<INT_PTR>(surfaceBrush);
+    }
+    return FALSE;
+}
 struct SettingsTabsState {
-    HWND provider=nullptr,mcp=nullptr;
+    HWND provider=nullptr,mcp=nullptr,computer=nullptr;
     int selected=105;
-    std::wstring url,key,model,mcpText;
+    std::wstring url,key,model,mcpText,modelTurns,toolCalls;
 };
 INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     auto state=reinterpret_cast<SettingsTabsState*>(GetWindowLongPtrW(window,DWLP_USER));
@@ -342,8 +441,8 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
         InitModalChrome(window,L"Settings",640,474);
         state=new SettingsTabsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
-        for(int id:{105,106}) {
-            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":L"MCP",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale(id==105?0:320),scale(Header),scale(320),scale(44),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
+        for(int id:{105,106,107}) {
+            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":L"Computer Control",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale((id-105)*640/3),scale(Header),scale((id-104)*640/3-(id-105)*640/3),scale(44),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
             SetWindowLongPtrW(button,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
         }
         auto page=[&](DLGPROC proc) {
@@ -352,27 +451,36 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
             auto child=CreateDialogIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,window,proc,0);
             MoveWindow(child,0,scale(Header+44),scale(640),scale(430),TRUE);return child;
         };
-        state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);
-        if(!state->provider||!state->mcp){EndDialog(window,IDCANCEL);return TRUE;}
+        state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);state->computer=page(ComputerSettingsProc);
+        if(!state->provider||!state->mcp||!state->computer){EndDialog(window,IDCANCEL);return TRUE;}
         state->url=ControlText(state->provider,101);state->key=ControlText(state->provider,102);state->model=ControlText(state->provider,103);state->mcpText=ControlText(state->mcp,201);
+        state->modelTurns=ControlText(state->provider,108);state->toolCalls=ControlText(state->provider,109);
         ShowWindow(state->provider,SW_SHOW);ShowWindow(state->mcp,SW_HIDE);SetFocus(GetDlgItem(state->provider,101));return FALSE;
     }
     if(message==WM_COMMAND&&state) {
         int id=LOWORD(wParam);
-        if(id==105||id==106) {
-            state->selected=id;ShowWindow(state->provider,id==105?SW_SHOW:SW_HIDE);ShowWindow(state->mcp,id==106?SW_SHOW:SW_HIDE);
-            InvalidateRect(GetDlgItem(window,105),nullptr,TRUE);InvalidateRect(GetDlgItem(window,106),nullptr,TRUE);
-            SetFocus(GetDlgItem(id==105?state->provider:state->mcp,id==105?101:201));return TRUE;
+        if(id==105||id==106||id==107) {
+            state->selected=id;ShowWindow(state->provider,id==105?SW_SHOW:SW_HIDE);ShowWindow(state->mcp,id==106?SW_SHOW:SW_HIDE);ShowWindow(state->computer,id==107?SW_SHOW:SW_HIDE);
+            InvalidateRect(GetDlgItem(window,105),nullptr,TRUE);InvalidateRect(GetDlgItem(window,106),nullptr,TRUE);InvalidateRect(GetDlgItem(window,107),nullptr,TRUE);
+            SetFocus(GetDlgItem(id==105?state->provider:id==106?state->mcp:state->computer,id==105?101:id==106?201:401));return TRUE;
         }
         if(id==IDCANCEL){EndDialog(window,IDCANCEL);return TRUE;}
         if(id==IDOK) {
             try {
                 auto url=ControlText(state->provider,101),key=ControlText(state->provider,102),model=ControlText(state->provider,103),mcpText=ControlText(state->mcp,201);
-                bool providerChanged=url!=state->url||key!=state->key||model!=state->model;
+                auto modelTurns=ControlText(state->provider,108),toolCalls=ControlText(state->provider,109);
+                auto limit=[&](const std::wstring& text,int maximum,const char* error){
+                    if(text.empty()||text.size()>4||text.find_first_not_of(L"0123456789")!=text.npos)throw std::runtime_error(error);
+                    int value=std::stoi(text);if(value<1||value>maximum)throw std::runtime_error(error);return value;
+                };
+                int turns=limit(modelTurns,100,"Maximum model turns must be between 1 and 100.");
+                int calls=limit(toolCalls,1000,"Maximum tool calls must be between 1 and 1000.");
+                bool providerChanged=url!=state->url||key!=state->key||model!=state->model||modelTurns!=state->modelTurns||toolCalls!=state->toolCalls;
                 auto mcp=nlohmann::json::parse(chat::Utf8(mcpText),nullptr,false);
                 if(mcp.is_discarded())throw std::runtime_error("Invalid MCP JSON. Check quotes, commas, and braces.");
                 chat::ValidateMcpConfig(mcp);
                 chat::Config config;config.url=chat::Utf8(url);config.key=chat::Utf8(key);config.model=chat::Utf8(model);
+                config.maxModelTurns=turns;config.maxToolCalls=calls;
                 if(providerChanged||state->selected==105)chat::ValidateConfig(config);
                 if(providerChanged||state->selected==105)chat::SaveConfig(configDirectory,config);
                 if(mcpText!=state->mcpText||state->selected==106)chat::SaveMcpConfig(configDirectory,mcp);
@@ -381,11 +489,11 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
             return TRUE;
         }
     }
-    if(message==WM_DRAWITEM&&state&&(wParam==105||wParam==106)) {
+    if(message==WM_DRAWITEM&&state&&(wParam==105||wParam==106||wParam==107)) {
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);bool selected=state->selected==static_cast<int>(item.CtlID);
         POINT point{};GetCursorPos(&point);ScreenToClient(item.hwndItem,&point);
         Fill(item.hDC,item.rcItem,selected?Surface:PtInRect(&item.rcItem,point)?RGB(40,40,40):Panel);
-        Text(item.hDC,item.CtlID==105?L"Provider":L"MCP",item.rcItem,labelFont,selected?Ink:Muted,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
+        Text(item.hDC,item.CtlID==105?L"Provider":item.CtlID==106?L"MCP":L"Computer Control",item.rcItem,labelFont,selected?Ink:Muted,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
         Line(item.hDC,item.rcItem.left,item.rcItem.bottom-1,item.rcItem.right,item.rcItem.bottom-1,selected?RGB(110,110,110):Border);
         if(item.CtlID==105)Line(item.hDC,item.rcItem.right-1,item.rcItem.top,item.rcItem.right-1,item.rcItem.bottom);
         return TRUE;

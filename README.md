@@ -15,7 +15,7 @@ The app stays named `chat.exe` and has an embedded `asInvoker` manifest, so it r
 
 Navigation and window controls use [Bootstrap Icons](https://icons.getbootstrap.com/) v1.13.1, embedded in the executable for offline use. The icon font is loaded privately in memory; no font installation or extra runtime files are required. Its MIT license and original assets are in `third_party/bootstrap-icons`, and the license is also embedded in the executable.
 
-The top-left header carries a Bootstrap chat icon as the app logo. The same icon is embedded in the executable for the Windows taskbar, Alt+Tab, and Explorer, with sizes from 16 to 256 pixels. Regenerate `app.ico` with `powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-app-icon.ps1` when changing the logo. Click the sidebar icon at the top of the left column, above New chat, or press **Ctrl+B**, to switch between the expanded navigation and a 72 DIP icon rail. New chat and Settings remain accessible in both modes, with hover labels on the icon buttons. Collapsing the sidebar gives the conversation and composer more room while retaining the current chat and draft.
+The top-left header carries a Bootstrap chat icon as the app logo. The same icon is embedded in the executable for the Windows taskbar, Alt+Tab, and Explorer, with sizes from 16 to 256 pixels. Regenerate `resources/app.ico` with `powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-app-icon.ps1` when changing the logo. Click the sidebar icon at the top of the left column, above New chat, or press **Ctrl+B**, to switch between the expanded navigation and a 72 DIP icon rail. New chat and Settings remain accessible in both modes, with hover labels on the icon buttons. Collapsing the sidebar gives the conversation and composer more room while retaining the current chat and draft.
 
 Settings, MCP settings, and message dialogs use square window corners and the main window's custom 48 DIP dark header, Bootstrap close icon, and continuous 1px divider. Drag the header to move a modal; its close button cancels the dialog (or declines a confirmation).
 
@@ -55,7 +55,7 @@ Requests include conversation history and use OpenRouter's HTTPS chat completion
 
 The app supports an agent loop with a `powershell` function tool. It receives streamed tool-call fragments, waits for the complete call, validates the arguments, runs commands sequentially, adds each result with its matching `tool_call_id`, and calls the model again. Text continues streaming throughout model responses. Select an `OPENROUTER_MODEL` that supports tool calling.
 
-Each sent prompt shows LLM progress, call count, sent/received token counts, and elapsed time beneath it. Token counts come from provider usage reports and are summed across all model calls for that prompt, including tool follow-ups; missing usage is shown as "not reported," and incomplete totals show how many calls reported usage. LLM time measures model requests; total time also includes configuration, MCP connection setup, and tool execution. Tool commands, output, and exit status appear in execution order. The loop stops after eight model turns or sixteen executed tool calls. Unknown tools and invalid arguments return structured errors to the model.
+Each sent prompt shows LLM progress, call count, sent/received token counts, and elapsed time beneath it. Token counts come from provider usage reports and are summed across all model calls for that prompt, including tool follow-ups; missing usage is shown as "not reported," and incomplete totals show how many calls reported usage. LLM time measures model requests; total time also includes configuration, MCP connection setup, and tool execution. Tool commands, output, and exit status appear in execution order. Set **Max model turns** (1?100) and **Max tool calls** (1?1000) in **Settings > Provider** to control each run. Defaults are eight turns and sixteen executed tool calls. Limits are saved for subsequent runs; active runs keep their existing limits. The last model turn cannot execute further tools. Unknown tools and invalid arguments return structured errors to the model.
 
 PowerShell calls start fresh in the configuration/project directory. They run hidden, noninteractively, with normal user permissions; this working directory is **not a filesystem sandbox**. Commands can inspect and modify files. Calls default to a 30-second timeout (configurable by the model from 1 to 120 seconds), capture at most 64 KB of combined output, and terminate their process tree on cancellation, timeout, or completion. The chat displays up to 4,000 characters of each output. Provider key environment variables are removed from the child process; the active API key is redacted from tool output and displayed activity. The system prompt instructs the model not to read credential files.
 
@@ -63,17 +63,19 @@ New chat clears history and cancels the current operation. Completed filesystem 
 
 ## Computer control
 
-The built-in `computer` tool lets the agent operate the Windows desktop using screenshots, pointer movement, left/right/middle clicks, double clicks, dragging, vertical scrolling, Unicode typing, key combinations, and cancellable waits. Choose a model that supports both vision and function tools, then ask for a desktop task in chat. No MCP server or extra runtime is needed.
+Open **Settings > Computer Control > Test access** to verify a real mouse click, keyboard text delivery, and screenshot capture in the settings test field. The result identifies failed checks. **Test mouse circle** moves the pointer around a visible circle for three seconds, checks that each position was reached, and returns it to its starting position. Keep Settings in the foreground and the desktop unlocked while testing. Windows blocks input to elevated applications and secure desktops from a normal application.
+
+The built-in `computer` tool lets the agent operate the Windows desktop using screenshots, pointer movement, left/right/middle clicks, double clicks, dragging, vertical scrolling, Unicode typing, key combinations, and cancellable waits. Choose a model that supports both vision and function tools, then ask for a desktop task in chat. No MCP server or extra runtime is needed. Computer actions execute from structured model tool calls in either streamed or JSON Chat Completions responses. Action arguments and results appear in chat; JSON written as ordinary assistant prose is not executed.
 
 Screenshots capture all monitors as a PNG and send it to your configured provider. The result includes `left`, `top`, `width`, and `height` in physical desktop pixels. Image pixel `(0,0)` maps to desktop `(left,top)`; monitors left of the primary display can have negative coordinates. Actions use those desktop coordinates. Only the newest screenshot batch stays in model history to bound image usage. Screenshots are held in memory and are not written to disk.
 
 Examples: `{"action":"screenshot"}`, `{"action":"click","x":500,"y":400}`, `{"action":"key","keys":["CTRL","L"]}`, `{"action":"type","text":"Hello"}`, and `{"action":"scroll","delta":-3}`. Drag uses `x`, `y`, `to_x`, and `to_y`. Positive scroll deltas go up. Key combinations release their modifiers after execution.
 
-Input affects the active desktop and focused application, with the app's ordinary Windows permissions. Keep the session unlocked and avoid using the mouse and keyboard during a task. Elevated windows and secure desktops may reject input. Stop cancels further actions and waits; completed input remains. The existing eight-turn / sixteen-tool-call limits apply; send a follow-up to continue longer tasks. Tool activity and errors appear in chat.
+Input affects the active desktop and focused application, with the app's ordinary Windows permissions. Keep the session unlocked and avoid using the mouse and keyboard during a task. Elevated windows and secure desktops may reject input. Stop cancels further actions and waits; completed input remains. The configured model-turn and tool-call limits apply; send a follow-up to continue longer tasks. Tool activity and errors appear in chat.
 
 ## MCP servers
 
-Open **Settings** and select the **MCP** tab beside **Provider**. Both tabs use square edges and 1px separators. Add servers using the standard `mcpServers` JSON object, click **Test connections** to see discovered tools, then **Save**. Switching tabs retains your edits, and Save validates and keeps changes from both tabs. **Example** inserts disabled local and remote entries. Cancel discards unsaved edits.
+Open **Settings** and select the **MCP** tab beside **Provider**. The tabs use square edges and 1px separators. Add servers using the standard `mcpServers` JSON object, click **Test connections** to see discovered tools, then **Save**. Switching tabs retains your edits, and Save validates and keeps changes from both tabs. **Example** inserts disabled local and remote entries. Cancel discards unsaved edits.
 
 **Disable** immediately saves a global MCP-off setting, retaining all server definitions and credentials. The button changes to **Enable** so MCP can be restored without re-entering server details. This affects new prompts; in-progress requests keep their existing connections. Each individual server can also use `"enabled": false` in the JSON configuration.
 
@@ -106,15 +108,35 @@ MCP configuration, including environment values and HTTP headers, is encrypted f
 
 ## Source layout
 
-- `main.cpp`: DPI-aware Win32 drawing, shared spacing/layout, input, custom title bar, and UI message handling.
-- `markdown.h` / `markdown.cpp`: Markdown parsing into native blocks and styled text runs, including tables, lists, links, and entity decoding.
-- `config.h` / `config.cpp`: configuration and credential loading.
-- `chat_client.h` / `chat_client.cpp`: streaming requests, WinHTTP, timeouts, and cancellation.
-- `stream_decoder.h` / `stream_decoder.cpp`: incremental SSE framing, UTF-8 content deltas, and stream completion validation.
-- `agent.h` / `agent.cpp`: bounded model/tool loop, validated tool dispatch, protocol history, and progress events.
-- `powershell_tool.h` / `powershell_tool.cpp`: hidden command execution, UTF-8 output capture, timeout, and process-tree cancellation.
-- `mcp_client.h` / `mcp_client.cpp`: encrypted MCP settings, stdio server processes, initialization, tool discovery, namespacing, and invocation. The HTTP transport uses the shared asynchronous WinHTTP client.
-- `chat_worker.h` / `chat_worker.cpp`: one owned worker thread, request replacement, and clean shutdown. Results are posted to the UI thread.
+```text
+src/
+  app/       # Win32 entry point, UI integration, worker lifecycle
+  agent/     # Model/tool loop and progress events
+  client/    # Chat API, SSE decoding, call metrics
+  common/    # Text encoding, attachments, tool-output formatting
+  config/    # Provider settings and credential loading
+  tools/     # PowerShell, desktop control, MCP client
+  ui/        # Markdown parsing and code highlighting
+resources/   # Windows resource script and application icon
+third_party/ # Vendored dependencies and their licenses
+tests/      # C++ test runner, mock servers, UI smoke tests
+tools/      # Development scripts, including icon generation
+docs/       # Reference images and design notes
+```
+
+Implementation files and their private headers are colocated. Project includes use paths relative to `src/`, such as `"client/chat_client.h"`; dependency includes resolve from `third_party/`, such as `<nlohmann/json.hpp>`. There is no public `include/` directory because this project builds an application, not an installed library. Keep generated files in `build/` or `out/`, both ignored for new files, and personal CMake settings in `CMakeUserPresets.json`.
+
+`build.cmd` remains the direct MSVC build entry point, with a shared source list for the app and test executable. `CMakeLists.txt` also provides `harness_core` (shared internal implementation), `chat` (Win32 app and resources), and `chat-tests` targets. Compiler settings, include paths, and Windows library dependencies are scoped to their targets. Vendored MD4C C code is compiled separately.
+
+For CMake with Visual Studio's C++ CMake tools installed, use a developer shell:
+
+```powershell
+cmake -S . -B out/build
+cmake --build out/build --config Release
+ctest --test-dir out/build -C Release --output-on-failure
+```
+
+Node.js is required to run the integration tests. CTest launches the same loopback mock server and test executable as `build.cmd test`; tests run with the repository root as their working directory. Desktop screenshot coverage requires an unlocked interactive Windows desktop. Use `-DBUILD_TESTING=OFF` at configure time for an app-only build. Visual Studio can also open the repository directly as a CMake project. CMake executables live in its build directory (under `Release/` for Visual Studio); configure the provider through Settings when running from that location, or put `.env` beside the executable. The direct build still produces `build/chat.exe`.
 
 The client uses asynchronous WinHTTP handles internally so it can cancel in-flight I/O safely. Request buffers and callback state stay alive until WinHTTP signals handle closure. The UI never performs network operations or closes networking handles across threads.
 

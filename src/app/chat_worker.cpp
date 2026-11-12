@@ -1,5 +1,5 @@
-﻿#include "chat_worker.h"
-#include "text_encoding.h"
+#include "app/chat_worker.h"
+#include "common/text_encoding.h"
 
 namespace chat {
 ChatWorker::ChatWorker(std::filesystem::path directory, Delivery delivery, Endpoint endpoint)

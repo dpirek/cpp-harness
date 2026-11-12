@@ -1,18 +1,19 @@
-#include "chat_client.h"
-#include "chat_worker.h"
-#include "stream_decoder.h"
-#include "agent.h"
-#include "powershell_tool.h"
-#include "computer_tool.h"
-#include "text_encoding.h"
-#include "code_format.h"
-#include "mcp_client.h"
-#include "markdown.h"
-#include "tool_format.h"
-#include "third_party/nlohmann/json.hpp"
+#include "client/chat_client.h"
+#include "app/chat_worker.h"
+#include "client/stream_decoder.h"
+#include "agent/agent.h"
+#include "tools/powershell_tool.h"
+#include "tools/computer_tool.h"
+#include "common/text_encoding.h"
+#include "ui/code_format.h"
+#include "tools/mcp_client.h"
+#include "ui/markdown.h"
+#include "common/tool_format.h"
+#include <nlohmann/json.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -100,10 +101,16 @@ int main(int argc,char** argv) {
         SaveConfig(directory,keyless);
         Check(LoadConfig(directory).key.empty(),"Keyless settings persist without borrowing environment credentials");
         Config saved;saved.key="settings-secret";saved.model="custom/model";saved.url="http://localhost:8080/v1/chat/completions?version=1";
+        saved.maxModelTurns=12;saved.maxToolCalls=40;
         SaveConfig(directory,saved);
         auto restored=LoadConfig(directory);
         Check(restored.key==saved.key&&restored.model==saved.model&&restored.url==saved.url,"Provider settings persist with encrypted key");
         {std::ifstream file(directory/L"provider-settings.json");std::string body((std::istreambuf_iterator<char>(file)),{});Check(body.find(saved.key)==std::string::npos,"Saved key is not plaintext");}
+        Check(restored.maxModelTurns==12&&restored.maxToolCalls==40,"Run limits persist with provider settings");
+        auto invalidLimits=saved;invalidLimits.maxModelTurns=0;bool rejectedLimit=false;try{ValidateConfig(invalidLimits);}catch(...){rejectedLimit=true;}Check(rejectedLimit,"Zero model turn limit rejected");
+        invalidLimits=saved;invalidLimits.maxToolCalls=1001;rejectedLimit=false;try{ValidateConfig(invalidLimits);}catch(...){rejectedLimit=true;}Check(rejectedLimit,"Excessive tool limit rejected");
+        {std::ifstream file(directory/L"provider-settings.json");auto old=nlohmann::json::parse(file);file.close();old.erase("max_model_turns");old.erase("max_tool_calls");std::ofstream out(directory/L"provider-settings.json");out<<old.dump();}
+        auto legacyLimits=LoadConfig(directory);Check(legacyLimits.maxModelTurns==8&&legacyLimits.maxToolCalls==16,"Older saved settings retain default run limits");
         auto parsedProvider=ProviderEndpoint(saved.url);
         Check(parsedProvider.host==L"localhost"&&parsedProvider.port==8080&&!parsedProvider.secure&&parsedProvider.path==L"/v1/chat/completions?version=1","Custom provider URL routing");
         bool badUrl=false;try{ProviderEndpoint("https://user:password@example.com/path");}catch(...){badUrl=true;}Check(badUrl,"Provider URL credentials rejected");
@@ -177,6 +184,8 @@ int main(int argc,char** argv) {
         Check(multiline.Finish().ok,"Multiline SSE data and CR framing");
         Check(Wide(payload["messages"][1]["content"].get<std::string>())==history[0].text,"Unicode and escaping roundtrip");
         Check(ParseReply(200,R"({"choices":[{"message":{"content":"Hello \ud83d\ude80\nnext"}}]})").text==L"Hello \U0001f680\nnext","Response Unicode decoding");
+        auto jsonTool=ParseReply(200,R"({"choices":[{"message":{"content":null,"tool_calls":[{"id":"move","type":"function","function":{"name":"computer","arguments":"{\"action\":\"move\",\"x\":100,\"y\":200}"}}]}}]})");
+        Check(jsonTool.ok&&jsonTool.toolCalls.size()==1&&jsonTool.toolCalls[0].name=="computer","JSON completion preserves computer tool calls with null text");
         Check(!ParseReply(200,"invalid").ok,"Malformed JSON rejected");
         Check(!ParseReply(200,R"({"choices":[]})").ok,"Missing choice rejected");
         Check(!ParseReply(200,R"({"choices":[{"message":{"content":null}}]})").ok,"Null content rejected");
@@ -312,6 +321,36 @@ int main(int argc,char** argv) {
         Check(RunComputer({{"action","wait"},{"milliseconds",0},{"unknown",true}},cancel).output.contains("error"),"Computer rejects unknown arguments");
         Cancellation stoppedComputer;stoppedComputer.Cancel();
         Check(RunComputer({{"action","screenshot"}},stoppedComputer).output.contains("error"),"Computer cancellation prevents capture");
+        // Exercise the same background-thread path as ChatWorker while the UI pumps input.
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        HWND target=CreateWindowExW(WS_EX_TOPMOST,L"STATIC",L"Computer model input test",WS_OVERLAPPEDWINDOW|WS_VISIBLE,100,100,500,180,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        HWND field=CreateWindowW(L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,20,40,440,40,target,nullptr,GetModuleHandleW(nullptr),nullptr);
+        Check(target&&field,"Computer input fixture window created");
+        ShowWindow(target,SW_SHOW);SetForegroundWindow(target);
+        RECT fieldRect{};GetWindowRect(field,&fieldRect);
+        nlohmann::json inputFixture={{"x",(fieldRect.left+fieldRect.right)/2},{"y",(fieldRect.top+fieldRect.bottom)/2}};
+        POINT original{};GetCursorPos(&original);
+        bool delivered=true;
+        for(const auto path:{L"/agent-computer-input-stream",L"/agent-computer-input-json"}) {
+            SetWindowTextW(field,L"");SetForegroundWindow(target);
+            auto inputEndpoint=endpoint;inputEndpoint.path=path;inputEndpoint.timeoutMs=10000;
+            auto task=std::async(std::launch::async,[&]{return RunAgent(config,{{L"user",Wide(inputFixture.dump())}},directory,cancel,inputEndpoint);});
+            while(task.wait_for(0ms)!=std::future_status::ready) {
+                MSG event{};while(PeekMessageW(&event,nullptr,0,0,PM_REMOVE)){TranslateMessage(&event);DispatchMessageW(&event);}
+                Sleep(1);
+            }
+            auto inputResult=task.get();
+            MSG event{};while(PeekMessageW(&event,nullptr,0,0,PM_REMOVE)){TranslateMessage(&event);DispatchMessageW(&event);}
+            wchar_t received[128]{};GetWindowTextW(field,received,128);
+            POINT actual{};GetCursorPos(&actual);
+            if(!inputResult.reply.ok||std::wstring(received)!=L"Model input delivered") {
+                std::cerr<<"Input path "<<Utf8(path)<<" reply="<<Utf8(inputResult.reply.text)<<" received="<<Utf8(received)<<" cursor="<<actual.x<<","<<actual.y<<"\n";
+                for(const auto& m:inputResult.history)if(m.role==L"tool")std::cerr<<Utf8(m.text)<<"\n";
+            }
+            delivered=delivered&&inputResult.reply.ok&&inputResult.reply.text==L"Input complete"&&std::wstring(received)==L"Model input delivered"&&actual.x==inputFixture["x"].get<int>()&&actual.y==inputFixture["y"].get<int>();
+        }
+        DestroyWindow(target);SetCursorPos(original.x,original.y);
+        Check(delivered,"Streamed and JSON model tool calls move click type and execute keyboard chords from background agent");
         endpoint.path=L"/agent-computer";endpoint.timeoutMs=10000;
         auto desktopAgent=RunAgent(config,{{L"user",L"Inspect desktop"}},directory,cancel,endpoint);
         if(!desktopAgent.reply.ok||desktopAgent.reply.text!=L"Desktop received"){std::cerr<<Utf8(desktopAgent.reply.text)<<"\n";for(auto& m:desktopAgent.history)if(m.role==L"tool")std::cerr<<Utf8(m.text)<<"\n";}
@@ -327,6 +366,10 @@ int main(int argc,char** argv) {
         for(auto path:{L"/badtool",L"/badargs"}){endpoint.path=path;agent=RunAgent(config,{{L"user",L"Recover"}},directory,cancel,endpoint);Check(agent.reply.ok&&agent.reply.text==L"Recovered","Tool validation failures returned to model for recovery");}
         endpoint.path=L"/loop";agent=RunAgent(config,{{L"user",L"Loop"}},directory,cancel,endpoint);
         Check(!agent.reply.ok&&agent.history.size()==17&&agent.reply.text.find(L"step limit")!=agent.reply.text.npos,"Agent loop stops after eight model turns");
+        auto limited=config;limited.maxModelTurns=3;agent=RunAgent(limited,{{L"user",L"Loop"}},directory,cancel,endpoint);
+        Check(agent.reply.metrics.calls==3&&agent.history.size()==7&&agent.reply.text.find(L"step limit")!=agent.reply.text.npos,"Configured model turn limit enforced");
+        limited=config;limited.maxToolCalls=1;endpoint.path=L"/agent";agent=RunAgent(limited,{{L"user",L"Run tools"}},directory,cancel,endpoint);
+        Check(agent.reply.metrics.calls==1&&nlohmann::json::parse(Utf8(agent.history.back().text)).contains("error"),"Configured tool call limit stops additional commands");
         std::filesystem::remove(directory/L"agent-output.txt");
         std::filesystem::remove(envFile);std::filesystem::remove(directory);
         std::cout<<"All configuration, streaming, PowerShell, agent-loop, cancellation, and worker tests passed.\n";

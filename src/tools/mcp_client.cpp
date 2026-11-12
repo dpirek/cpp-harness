@@ -1,6 +1,6 @@
 #define NOMINMAX
-#include "mcp_client.h"
-#include "text_encoding.h"
+#include "tools/mcp_client.h"
+#include "common/text_encoding.h"
 #include <wincrypt.h>
 #include <algorithm>
 #include <array>

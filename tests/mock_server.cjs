@@ -62,6 +62,26 @@ const server = http.createServer((req, res) => {
       case '/markdown/chat/completions':
         res.end(delta('# Formatted response\n\n**Bold** and *italic*, `inline code`, [link](https://example.com).\n\n- Bullet item\n- [x] Task done\n\n> Quoted text.\n\n| Name | Value |\n| --- | --- |\n| XML | Yes |\n\n```xml\n<root>value</root>\n```\n')+done);
         break;
+      case '/agent-computer-input-json':
+      case '/agent-computer-input-stream': {
+        const fixture=JSON.parse(payload.messages.find(m=>m.role==='user').content);
+        const outputs=payload.messages.filter(m=>m.role==='tool');
+        const calls=[
+          {id:'move',name:'computer',arguments:JSON.stringify({action:'move',x:fixture.x,y:fixture.y})},
+          {id:'click',name:'computer',arguments:JSON.stringify({action:'click',x:fixture.x,y:fixture.y})},
+          {id:'type',name:'computer',arguments:JSON.stringify({action:'type',text:'replace me'})},
+          {id:'key',name:'computer',arguments:JSON.stringify({action:'key',keys:['SHIFT','HOME']})},
+          {id:'replace',name:'computer',arguments:JSON.stringify({action:'type',text:'Model input delivered'})}
+        ];
+        if(outputs.length) {
+          if(outputs.length!==calls.length||outputs.some((o,i)=>o.tool_call_id!==calls[i].id||JSON.parse(o.content).ok!==true)){res.writeHead(400).end();break;}
+          res.end(delta('Input complete')+done);
+        } else if(req.url.endsWith('-json')) {
+          res.setHeader('Content-Type','application/json');
+          res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:calls.map(c=>({id:c.id,type:'function',function:{name:c.name,arguments:c.arguments}}))}}]}));
+        } else res.end(toolStream(calls));
+        break;
+      }
       case '/agent-computer': {
         const outputs=payload.messages.filter(m=>m.role==='tool');
         if(!payload.tools.some(t=>t.function.name==='computer')){res.writeHead(400).end();break;}
@@ -170,7 +190,10 @@ const server = http.createServer((req, res) => {
 });
 server.listen(0, '127.0.0.1', () => {
   const ui=process.argv.includes('--ui');
-  const child = ui ? spawn('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File','tests/ui_smoke.ps1','-Executable','build/chat-preview.exe','-ModelServerPort',String(server.address().port)],{stdio:'inherit',windowsHide:true}) : spawn(path.resolve('build/chat-tests.exe'), [String(server.address().port)], {stdio:'inherit', windowsHide:true});
+  const executableFlag=process.argv.indexOf('--test-executable');
+  const testExecutable=executableFlag<0?'build/chat-tests.exe':process.argv[executableFlag+1];
+  if(!testExecutable){console.error('--test-executable requires a path');server.close();process.exitCode=1;return;}
+  const child = ui ? spawn('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File','tests/ui_smoke.ps1','-Executable','build/chat-preview.exe','-ModelServerPort',String(server.address().port)],{stdio:'inherit',windowsHide:true}) : spawn(path.resolve(testExecutable), [String(server.address().port)], {stdio:'inherit', windowsHide:true});
   const timer = setTimeout(() => { child.kill(); console.error('Test deadline exceeded'); }, 30000);
   child.on('error', error => { console.error(error.message); clearTimeout(timer);server.close();process.exitCode=1; });
   child.on('exit', code => { clearTimeout(timer);server.closeAllConnections();server.close();if(ui&&attachmentRequests!==1){console.error('Expected one request with dropped attachment contents');process.exitCode=1;}else process.exitCode=code ?? 1; });

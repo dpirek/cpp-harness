@@ -1,6 +1,6 @@
 #pragma once
-#include "third_party/nlohmann/json.hpp"
-#include "text_encoding.h"
+#include <nlohmann/json.hpp>
+#include "common/text_encoding.h"
 #include <string>
 #include <algorithm>
 

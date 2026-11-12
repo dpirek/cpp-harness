@@ -197,6 +197,28 @@ try {
   $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]105,[IntPtr]::Zero)
   if(![UiCheck]::IsWindowVisible([UiCheck]::GetDlgItem($dialog,101)) -or [UiCheck]::IsWindowVisible([UiCheck]::GetDlgItem($dialog,201))){throw 'Provider tab must restore its panel.'}
  }
+ $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]107,[IntPtr]::Zero)
+ $testButton=[UiCheck]::GetDlgItem($dialog,401)
+ if($testButton -eq [IntPtr]::Zero -or ![UiCheck]::IsWindowVisible($testButton)){throw 'Computer Control tab is missing its access test.'}
+ $null=[UiCheck]::SendMessage($testButton,0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
+ for($attempt=0;$attempt -lt 50;$attempt++) {
+  Start-Sleep -Milliseconds 100
+  $access=New-Object System.Text.StringBuilder 1024
+  $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($dialog,403),13,[IntPtr]1024,$access)
+  if([UiCheck]::IsWindowEnabled($testButton)){break}
+ }
+ if(!$access.ToString().StartsWith('Access works:')){throw "Computer access test failed: $access"}
+ $circle=[UiCheck]::GetDlgItem($dialog,404)
+ if($circle -eq [IntPtr]::Zero){throw 'Mouse circle button missing.'}
+ $null=[UiCheck]::SendMessage($circle,0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
+ for($attempt=0;$attempt -lt 100;$attempt++) {
+  Start-Sleep -Milliseconds 100
+  if([UiCheck]::IsWindowEnabled($circle)){break}
+ }
+ $circleStatus=New-Object System.Text.StringBuilder 1024
+ $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($dialog,403),13,[IntPtr]1024,$circleStatus)
+ if(!$circleStatus.ToString().StartsWith('Mouse circle passed:')){throw "Mouse circle test failed: $circleStatus"}
+ SaveWindowPreview $dialog 'computer-settings-preview.png'
  $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]2,[IntPtr]::Zero)
  if(![UiCheck]::IsWindowEnabled($window)){throw 'Cancel must restore the main window.'}
  $null=[UiCheck]::SendMessage($window,0x111,[IntPtr]0x10004,[IntPtr]::Zero)

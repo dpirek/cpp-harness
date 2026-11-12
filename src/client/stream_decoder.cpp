@@ -1,6 +1,6 @@
-#include "stream_decoder.h"
-#include "text_encoding.h"
-#include "third_party/nlohmann/json.hpp"
+#include "client/stream_decoder.h"
+#include "common/text_encoding.h"
+#include <nlohmann/json.hpp>
 
 namespace chat {
 void StreamDecoder::Feed(std::string_view bytes) {
@@ -54,7 +54,7 @@ void StreamDecoder::Event() {
         if (delta.contains("tool_calls")) {
             if (!delta["tool_calls"].is_array()) throw std::runtime_error("Invalid streamed tool calls.");
             for (auto& fragment : delta["tool_calls"]) {
-                int index = fragment.at("index").get<int>();
+                int index = fragment.value("index", 0);
                 if (index < 0 || index >= 16) throw std::runtime_error("The model requested too many tools at once.");
                 auto& call = calls_[index];
                 if (fragment.contains("id") && fragment["id"].is_string()) call.id += fragment["id"].get<std::string>();

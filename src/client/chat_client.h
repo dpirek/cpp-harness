@@ -1,7 +1,7 @@
-﻿#pragma once
-#include "config.h"
-#include "call_metrics.h"
-#include "attachments.h"
+#pragma once
+#include "config/config.h"
+#include "client/call_metrics.h"
+#include "common/attachments.h"
 #include <windows.h>
 #include <memory>
 #include <functional>

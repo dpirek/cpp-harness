@@ -1,6 +1,6 @@
 #pragma once
-#include "chat_client.h"
-#include "third_party/nlohmann/json.hpp"
+#include "client/chat_client.h"
+#include <nlohmann/json.hpp>
 
 namespace chat {
 // Standard {"mcpServers":{"name":{"command":...,"args":[],"env":{}}}} configuration.

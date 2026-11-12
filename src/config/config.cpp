@@ -1,10 +1,10 @@
-#include "config.h"
-#include "text_encoding.h"
+#include "config/config.h"
+#include "common/text_encoding.h"
 #include <fstream>
 #include <map>
 #include <winhttp.h>
 #include <wincrypt.h>
-#include "third_party/nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
 #pragma comment(lib,"crypt32.lib")
 
 namespace chat {
@@ -25,6 +25,8 @@ std::string Environment(const wchar_t* name) {
 }
 }
 void ValidateConfig(const Config& config,bool requireKey) {
+    if(config.maxModelTurns<1||config.maxModelTurns>100)throw std::runtime_error("Maximum model turns must be between 1 and 100.");
+    if(config.maxToolCalls<1||config.maxToolCalls>1000)throw std::runtime_error("Maximum tool calls must be between 1 and 1000.");
     if(requireKey&&config.key.empty())throw std::runtime_error("Open Settings and enter an API key.");
     if(config.key.find_first_of("\r\n")!=config.key.npos)throw std::runtime_error("The API key contains an invalid newline.");
     if(Trim(config.model).empty())throw std::runtime_error("Enter a model ID.");
@@ -39,7 +41,7 @@ void SaveConfig(const std::filesystem::path& directory,const Config& config) {
     DATA_BLOB input{static_cast<DWORD>(config.key.size()),reinterpret_cast<BYTE*>(const_cast<char*>(config.key.data()))},encrypted{};
     if(!CryptProtectData(&input,L"Chat provider key",nullptr,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&encrypted))throw std::runtime_error("Could not protect the API key.");
     std::vector<unsigned char> bytes(encrypted.pbData,encrypted.pbData+encrypted.cbData);LocalFree(encrypted.pbData);
-    auto json=nlohmann::json{{"url",config.url},{"model",config.model},{"protected_key",bytes}};
+    auto json=nlohmann::json{{"url",config.url},{"model",config.model},{"protected_key",bytes},{"max_model_turns",config.maxModelTurns},{"max_tool_calls",config.maxToolCalls}};
     auto temporary=directory/L"provider-settings.json.tmp",destination=directory/L"provider-settings.json";
     {std::ofstream file(temporary,std::ios::binary|std::ios::trunc);file<<json.dump(2);file.flush();if(!file)throw std::runtime_error("Could not save provider settings.");}
     if(!MoveFileExW(temporary.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Could not replace provider settings.");
@@ -50,6 +52,13 @@ Config LoadConfig(const std::filesystem::path& directory,bool requireKey) {
         try {
             std::ifstream file(settings,std::ios::binary);auto json=nlohmann::json::parse(file);
             Config config;config.url=json.at("url").get<std::string>();config.model=json.at("model").get<std::string>();
+            auto readLimit=[&](const char* name,int fallback,int maximum){
+                if(!json.contains(name))return fallback;
+                const auto& value=json.at(name);
+                if(!value.is_number_integer()||value<1||value>maximum)throw std::runtime_error("Invalid run limit.");
+                return value.get<int>();
+            };
+            config.maxModelTurns=readLimit("max_model_turns",8,100);config.maxToolCalls=readLimit("max_tool_calls",16,1000);
             auto bytes=json.at("protected_key").get<std::vector<unsigned char>>();
             DATA_BLOB encrypted{static_cast<DWORD>(bytes.size()),bytes.data()},plain{};
             if(!CryptUnprotectData(&encrypted,nullptr,nullptr,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&plain))throw std::runtime_error("key");

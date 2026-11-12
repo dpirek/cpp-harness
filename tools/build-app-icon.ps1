@@ -21,7 +21,7 @@ try {
             $images += ,@($size, $stream.ToArray())
         } finally { $stream.Dispose(); $format.Dispose(); $font.Dispose(); $graphics.Dispose(); $bitmap.Dispose() }
     }
-    $destination = Join-Path $root 'app.ico'
+    $destination = Join-Path $root 'resources/app.ico'
     $file = [System.IO.File]::Create($destination)
     $writer = New-Object System.IO.BinaryWriter($file)
     try {

@@ -1,11 +1,11 @@
-#include "agent.h"
-#include "computer_tool.h"
+#include "agent/agent.h"
+#include "tools/computer_tool.h"
 #include <algorithm>
-#include "powershell_tool.h"
-#include "text_encoding.h"
-#include "third_party/nlohmann/json.hpp"
-#include "mcp_client.h"
-#include "tool_format.h"
+#include "tools/powershell_tool.h"
+#include "common/text_encoding.h"
+#include <nlohmann/json.hpp>
+#include "tools/mcp_client.h"
+#include "common/tool_format.h"
 
 namespace chat {
 namespace {
@@ -38,6 +38,7 @@ std::wstring McpDisplay(const nlohmann::json& result) {
 }
 AgentResult RunAgent(const Config& config,std::vector<Message> history,const std::filesystem::path& directory,
     const Cancellation& cancel,const Endpoint& endpoint,const OnAgentUpdate& onUpdate) {
+    ValidateConfig(config);
     AgentResult result;int totalTools=0;
     CallMetrics metrics;metrics.model=Wide(config.model);auto started=GetTickCount64();
     auto key=Wide(config.key);
@@ -49,7 +50,7 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
         mcp=std::make_unique<McpClient>(LoadMcpConfig(directory),directory,cancel,[&](const std::wstring& text){emit(UpdateKind::Tool,text);});
         requestConfig.extraTools=mcp->Definitions();
     }catch(const std::exception& error){emit(UpdateKind::Tool,Wide(error.what()));}
-    for(int round=0;round<8;++round) {
+    for(int round=0;round<config.maxModelTurns;++round) {
         if(cancel.IsCancelled()){result.reply.cancelled=true;break;}
         auto active=metrics;++active.calls;active.elapsedMs=GetTickCount64()-started;emit(UpdateKind::Status,CallActivity(active,L"Waiting for response"));
         bool firstDelta=true;auto callStarted=GetTickCount64();
@@ -69,7 +70,7 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
         for(auto& call:reply.toolCalls) {
             if(cancel.IsCancelled()){result.reply.cancelled=true;break;}
             nlohmann::json output;
-            if(round==7||totalTools>=16) {
+            if(round==config.maxModelTurns-1||totalTools>=config.maxToolCalls) {
                 output={{"error","Agent step limit reached; this command was not run."}};
             } else if(mcp&&mcp->HasTool(call.name)) {
                 auto args=nlohmann::json::parse(call.arguments,nullptr,false);
@@ -88,7 +89,7 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
                 ++totalTools;
                 auto args=nlohmann::json::parse(call.arguments,nullptr,false);
                 status(L"Computer running");
-                emit(UpdateKind::Tool,L"Computer action");
+                emit(UpdateKind::Tool,L"Computer action\n"+ToolOutput(Wide(args.is_discarded()?call.arguments:args.dump())));
                 auto computer=RunComputer(args,cancel);
                 output=std::move(computer.output);
                 if(!computer.screenshot.data.empty())screenshots.push_back(std::move(computer.screenshot));
@@ -130,7 +131,7 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
             image.attachments=std::move(screenshots);history.push_back(std::move(image));
         }
         if(result.reply.cancelled)break;
-        if(round==7||totalTools>=16){result.reply.text=L"Stopped at the agent step limit. Send a follow-up to continue.";break;}
+        if(round==config.maxModelTurns-1||totalTools>=config.maxToolCalls){result.reply.text=L"Stopped at the agent step limit. Send a follow-up to continue.";break;}
     }
     metrics.elapsedMs=GetTickCount64()-started;result.reply.metrics=metrics;
     result.history=std::move(history);return result;

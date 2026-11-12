@@ -1,5 +1,5 @@
 #pragma once
-#include "chat_client.h"
+#include "client/chat_client.h"
 
 namespace chat {
 enum class UpdateKind { Delta, Status, SegmentEnd, Tool };

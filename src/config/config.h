@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -8,6 +8,8 @@ struct Config {
     std::string key;
     std::string model = "openrouter/auto";
     std::string url = "https://openrouter.ai/api/v1/chat/completions";
+    int maxModelTurns = 8;
+    int maxToolCalls = 16;
     std::vector<std::string> extraTools; // Runtime tool definitions; never persisted.
 };
 // Saved settings override environment values, which override the UTF-8 .env file.

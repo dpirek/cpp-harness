@@ -1,5 +1,5 @@
 #pragma once
-#include "text_encoding.h"
+#include "common/text_encoding.h"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>

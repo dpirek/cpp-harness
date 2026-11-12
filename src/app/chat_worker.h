@@ -1,11 +1,11 @@
-﻿#pragma once
-#include "chat_client.h"
+#pragma once
+#include "client/chat_client.h"
 #include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
-#include "agent.h"
+#include "agent/agent.h"
 
 namespace chat {
 struct Result {

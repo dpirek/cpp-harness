@@ -18,18 +18,20 @@ if errorlevel 1 exit /b 1
 
 :build
 if not exist build mkdir build
+set "COMMON_SOURCES=src\ui\markdown.cpp src\config\config.cpp src\client\chat_client.cpp src\client\stream_decoder.cpp src\tools\powershell_tool.cpp src\tools\computer_tool.cpp src\tools\mcp_client.cpp src\agent\agent.cpp src\app\chat_worker.cpp"
+set "CPP_FLAGS=/nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE /I src /I third_party"
 cl /nologo /w /TC /c /DMD4C_USE_UTF16 third_party\md4c\md4c.c /Fobuild\md4c.obj
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /w /TC /c third_party\md4c\entity.c /Fobuild\entity.obj
 if errorlevel 1 exit /b %errorlevel%
 if /i "%~1"=="test" goto test
-rc /nologo /fo build\icons.res icons.rc
+rc /nologo /I . /fo build\icons.res resources\icons.rc
 if errorlevel 1 exit /b %errorlevel%
-cl /nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE main.cpp markdown.cpp config.cpp chat_client.cpp stream_decoder.cpp powershell_tool.cpp computer_tool.cpp mcp_client.cpp agent.cpp chat_worker.cpp /Fo:build\ /Fe:build\chat.exe /link build\icons.res build\md4c.obj build\entity.obj /SUBSYSTEM:WINDOWS /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" user32.lib gdi32.lib winhttp.lib dwmapi.lib
+cl %CPP_FLAGS% src\app\main.cpp %COMMON_SOURCES% /Fo:build\ /Fe:build\chat.exe /link build\icons.res build\md4c.obj build\entity.obj /SUBSYSTEM:WINDOWS /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" user32.lib gdi32.lib winhttp.lib dwmapi.lib
 exit /b %errorlevel%
 
 :test
-cl /nologo /W4 /EHsc /std:c++17 /DUNICODE /D_UNICODE tests.cpp markdown.cpp config.cpp chat_client.cpp stream_decoder.cpp powershell_tool.cpp computer_tool.cpp mcp_client.cpp agent.cpp chat_worker.cpp /Fo:build\ /Fe:build\chat-tests.exe /link build\md4c.obj build\entity.obj /INCREMENTAL:NO winhttp.lib
+cl %CPP_FLAGS% tests\tests.cpp %COMMON_SOURCES% /Fo:build\ /Fe:build\chat-tests.exe /link build\md4c.obj build\entity.obj /INCREMENTAL:NO winhttp.lib
 if errorlevel 1 exit /b %errorlevel%
 node tests\mock_server.cjs
 exit /b %errorlevel%

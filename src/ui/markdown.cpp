@@ -1,9 +1,9 @@
 #define NOMINMAX
 #define MD4C_USE_UTF16
-#include "markdown.h"
-#include "third_party/md4c/md4c.h"
+#include "ui/markdown.h"
+#include <md4c/md4c.h>
 extern "C" {
-#include "third_party/md4c/entity.h"
+#include <md4c/entity.h>
 }
 #include <optional>
 #include <cwctype>
