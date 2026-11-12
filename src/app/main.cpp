@@ -1222,7 +1222,11 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
     auto smallIcon=LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED);
     SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(smallIcon));
     if(savedWindow){auto rect=chat::VisibleWindowRect(savedWindow->normal,GetDpiForWindow(window));SetWindowPos(window,nullptr,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,SWP_NOZORDER|SWP_NOACTIVATE);}
-    ShowWindow(window,!savedWindow||savedWindow->maximized?SW_SHOWMAXIMIZED:SW_SHOWNORMAL);SetFocus(input);
+    int showCommand=!savedWindow||savedWindow->maximized?SW_SHOWMAXIMIZED:SW_SHOWNORMAL;
+    ShowWindow(window,showCommand);
+    // A launcher's initial hidden state must not hide the restored interactive window.
+    if(!IsWindowVisible(window))ShowWindow(window,showCommand);
+    SetFocus(input);
     ACCEL toggle{FVIRTKEY|FCONTROL,'B',4};auto shortcuts=CreateAcceleratorTableW(&toggle,1);
     MSG message;BOOL status;while((status=GetMessageW(&message,nullptr,0,0))>0){if(!TranslateAcceleratorW(window,shortcuts,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
     if(shortcuts)DestroyAcceleratorTable(shortcuts);return status==-1?1:0;

@@ -451,7 +451,7 @@ try {
    if(!(Test-Path -LiteralPath (Join-Path $isolated 'window-state.json'))){throw 'Window placement was not saved.'}
    $process=Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
    $null=$process.WaitForInputIdle(5000);$window=[UiCheck]::Find($process.Id)
-   if($window -eq [IntPtr]::Zero -or [UiCheck]::IsZoomed($window) -or [UiCheck]::IsIconic($window)){throw 'Normal/minimized close must restore a normal visible window.'}
+   if($window -eq [IntPtr]::Zero -or ![UiCheck]::IsWindowVisible($window) -or [UiCheck]::IsZoomed($window) -or [UiCheck]::IsIconic($window)){throw 'Normal/minimized close must restore a normal visible window.'}
    $actualBounds=New-Object UiCheck+Rect;$null=[UiCheck]::GetWindowRect($window,[ref]$actualBounds)
    if($actualBounds.Left -ne $expectedBounds.Left -or $actualBounds.Top -ne $expectedBounds.Top -or $actualBounds.Right -ne $expectedBounds.Right -or $actualBounds.Bottom -ne $expectedBounds.Bottom){throw 'Window position and size were not restored.'}
   }
