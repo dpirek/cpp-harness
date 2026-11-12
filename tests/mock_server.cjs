@@ -9,6 +9,7 @@ const server = http.createServer((req, res) => {
   req.on('data', chunk => data += chunk);
   req.on('end', () => {
     if(req.method==='GET') {
+      if(req.url==='/corporate/catalog?api-version=fixture'){res.writeHead(req.headers['api-key']==='test-key'&&!req.headers.authorization?200:401);res.end('{"data": [{"id":"corporate"}]}');return;}
       if(req.url==='/keyless/models') {res.writeHead(req.headers.authorization===undefined?200:400);res.end('{"data":[{"id":"local-model"}]}');return;}
       if(req.headers.authorization!=='Bearer test-key'){res.writeHead(401).end();return;}
       if(req.url==='/v1/models'||req.url==='/v1/models?version=required'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'z/model'},{id:'a/model'},{id:'z/model'},{id:''},{name:'invalid'}]}));return;}
@@ -20,6 +21,10 @@ const server = http.createServer((req, res) => {
     }
     let payload;
     try { payload = JSON.parse(data); } catch { res.writeHead(400).end(); return; }
+    if(req.url==='/openai/deployments/corporate/chat/completions?api-version=fixture') {
+      if(req.headers['api-key']!=='test-key'||req.headers.authorization||payload.model!=='corporate'){res.writeHead(422).end('Incorrect Azure routing or auth');return;}
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'Corporate reply'}}]}));return;
+    }
     if(req.url==='/mcp') {
       if(req.headers.authorization!=='Bearer mcp-token'){res.writeHead(401).end();return;}
       if(payload.method==='initialize') {

@@ -42,6 +42,7 @@ struct Endpoint {
 Endpoint ProviderEndpoint(const std::string& url);
 // Accept a base URL or a full Chat Completions URL; preserve query parameters.
 Endpoint InferenceEndpoint(const std::string& url);
+std::wstring ProviderAuthHeaders(const Config& config,const Endpoint& endpoint);
 std::vector<std::string> FetchModels(const Config& config, const Cancellation& cancel);
 // MCP JSON-RPC POST; preserves the server-assigned session and negotiated version.
 std::string McpHttpPost(const std::string& url,const std::vector<std::pair<std::string,std::string>>& headers,

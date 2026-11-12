@@ -471,21 +471,32 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         control(L"STATIC",L"Chat completions URL",0,0,24,20,592,24);
         control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL,101,24,48,592,30);
         control(L"STATIC",L"API key (optional for local endpoints)",0,0,24,92,592,24);
-        auto key=control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD,102,24,120,592,30);
+        auto key=control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD,102,24,120,400,30);
         SendMessageW(key,EM_SETPASSWORDCHAR,0x25cf,0);
-        control(L"STATIC",L"Model",0,0,24,164,592,24);
-        auto model=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWN|CBS_AUTOHSCROLL|WS_VSCROLL,103,24,192,592,180);
+        control(L"STATIC",L"Auth header",0,0,440,92,176,24);
+        auto auth=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWN|CBS_AUTOHSCROLL|WS_VSCROLL,111,440,120,176,180);
+        for(auto name:{L"auto",L"Authorization",L"api-key",L"Ocp-Apim-Subscription-Key",L"none"})SendMessageW(auth,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
+        control(L"STATIC",L"Models URL (optional; leave blank for automatic discovery)",0,0,24,164,592,24);
+        control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL,112,24,192,592,30);
+        control(L"STATIC",L"Model or Azure deployment name",0,0,24,236,592,24);
+        auto model=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWN|CBS_AUTOHSCROLL|WS_VSCROLL,103,24,264,400,180);
         (void)model;
-        control(L"EDIT",L"Enter a provider URL to load available models.",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,104,24,234,592,52);
-        control(L"STATIC",L"Max model turns (1-100)",0,0,24,288,280,24);
-        control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,316,280,30);
-        control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,288,280,24);
-        control(L"EDIT",L"16",WS_TABSTOP|WS_BORDER|ES_NUMBER,109,336,316,280,30);
-        control(L"BUTTON",L"Save",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,396,378,100,32);
-        control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,378,110,32);
+        control(L"STATIC",L"Token limit field",0,0,440,236,176,24);
+        auto tokenField=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,113,440,264,176,180);
+        for(auto name:{L"max_tokens",L"max_completion_tokens",L"none"})SendMessageW(tokenField,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
+        control(L"BUTTON",L"Request token usage in stream (disable if unsupported)",WS_TABSTOP|BS_AUTOCHECKBOX,114,24,422,592,20);
+        control(L"EDIT",L"Enter a provider URL to load available models.",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,104,24,306,592,52);
+        control(L"STATIC",L"Max model turns (1-100)",0,0,24,360,280,24);
+        control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,388,280,30);
+        control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,360,280,24);
+        control(L"EDIT",L"16",WS_TABSTOP|WS_BORDER|ES_NUMBER,109,336,388,280,30);
+        control(L"BUTTON",L"Save",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,396,444,100,32);
+        control(L"BUTTON",L"Cancel",WS_TABSTOP,IDCANCEL,506,444,110,32);
         chat::Config config;
         try{config=chat::LoadConfig(configDirectory,false);}catch(...){ShowModalMessage(window,L"Saved settings could not be loaded. Enter the provider details to replace them.",L"Settings",MB_OK|MB_ICONINFORMATION);}
         SetDlgItemTextW(window,101,chat::Wide(config.url).c_str());SetDlgItemTextW(window,102,chat::Wide(config.key).c_str());SetDlgItemTextW(window,103,chat::Wide(config.model).c_str());
+        SetDlgItemTextW(window,111,chat::Wide(config.authHeader).c_str());SetDlgItemTextW(window,112,chat::Wide(config.modelsUrl).c_str());
+        SendDlgItemMessageW(window,113,CB_SETCURSEL,config.tokenLimitField=="max_completion_tokens"?1:config.tokenLimitField=="none"?2:0,0);CheckDlgButton(window,114,config.streamUsage?BST_CHECKED:BST_UNCHECKED);
         SetDlgItemInt(window,108,config.maxModelTurns,FALSE);SetDlgItemInt(window,109,config.maxToolCalls,FALSE);
         state=new SettingsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         if(!config.url.empty())QueueModels(window,*state);
@@ -507,7 +518,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         }
         if(state->pending&&GetTickCount64()>=state->due) {
             state->pending=false;
-            chat::Config config;config.url=chat::Utf8(ControlText(window,101));config.key=chat::Utf8(ControlText(window,102));
+            chat::Config config;config.url=chat::Utf8(ControlText(window,101));config.key=chat::Utf8(ControlText(window,102));config.authHeader=chat::Utf8(ControlText(window,111));config.modelsUrl=chat::Utf8(ControlText(window,112));
             state->issued=state->revision;state->cancel=std::make_shared<chat::Cancellation>();auto cancel=state->cancel;
             try {
                 state->request=std::async(std::launch::async,[config,cancel] {
@@ -519,7 +530,8 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         return TRUE;
     }
     if(message==WM_COMMAND) {
-        if(state&&HIWORD(wParam)==EN_CHANGE&&(LOWORD(wParam)==101||LOWORD(wParam)==102)) {
+        if(state&&LOWORD(wParam)==111&&(HIWORD(wParam)==CBN_EDITCHANGE||HIWORD(wParam)==CBN_SELCHANGE)){QueueModels(window,*state);return TRUE;}
+        if(state&&HIWORD(wParam)==EN_CHANGE&&(LOWORD(wParam)==101||LOWORD(wParam)==102||LOWORD(wParam)==112)) {
             auto selected=ControlText(window,103);QueueModels(window,*state);SetDlgItemTextW(window,103,selected.c_str());return TRUE;
         }
         if(LOWORD(wParam)==IDCANCEL||LOWORD(wParam)==IDOK){SendMessageW(GetParent(window),WM_COMMAND,LOWORD(wParam),0);return TRUE;}
@@ -694,12 +706,13 @@ LRESULT CALLBACK SettingsPageProc(HWND window,UINT message,WPARAM wParam,LPARAM 
 struct SettingsTabsState {
     HWND provider=nullptr,mcp=nullptr,computer=nullptr,prompt=nullptr;
     int selected=105;
-    std::wstring url,key,model,mcpText,modelTurns,toolCalls,systemPrompt;
+    std::wstring url,key,model,mcpText,modelTurns,toolCalls,systemPrompt,authHeader,modelsUrl,tokenLimitField;
+    bool streamUsage=true;
 };
 INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     auto state=reinterpret_cast<SettingsTabsState*>(GetWindowLongPtrW(window,DWLP_USER));
     if(message==WM_INITDIALOG) {
-        InitModalChrome(window,L"Settings",960,735);
+        InitModalChrome(window,L"Settings",960,805);
         state=new SettingsTabsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
         for(int id:{105,106,107,110}) {
@@ -718,7 +731,7 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                 RECT rect{};GetWindowRect(control,&rect);
                 wchar_t type[32]{};GetClassNameW(control,type,32);
                 if(lstrcmpiW(type,L"COMBOBOX")==0)SendMessageW(control,CB_GETDROPPEDCONTROLRECT,0,reinterpret_cast<LPARAM>(&rect));
-                if(lstrcmpiW(type,L"BUTTON")==0) {
+                if(lstrcmpiW(type,L"BUTTON")==0&&(GetWindowLongPtrW(control,GWL_STYLE)&BS_TYPEMASK)!=BS_AUTOCHECKBOX) {
                     auto style=GetWindowLongPtrW(control,GWL_STYLE);
                     SetWindowLongPtrW(control,GWL_STYLE,(style&~BS_TYPEMASK)|BS_OWNERDRAW);
                     SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
@@ -739,11 +752,13 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                 MoveWindow(control,MulDiv(rect.left,3,2),MulDiv(rect.top,3,2),MulDiv(rect.right-rect.left,3,2),MulDiv(rect.bottom-rect.top,3,2),TRUE);
                 return TRUE;
             },reinterpret_cast<LPARAM>(child));
-            MoveWindow(child,0,scale(Header+66),scale(960),scale(669),TRUE);return child;
+            MoveWindow(child,0,scale(Header+66),scale(960),scale(739),TRUE);return child;
         };
         state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);state->computer=page(ComputerSettingsProc);state->prompt=page(SystemPromptSettingsProc);
         if(!state->provider||!state->mcp||!state->computer||!state->prompt){EndDialog(window,IDCANCEL);return TRUE;}
         state->url=ControlText(state->provider,101);state->key=ControlText(state->provider,102);state->model=ControlText(state->provider,103);state->mcpText=ControlText(state->mcp,201);
+        state->tokenLimitField=ControlText(state->provider,113);state->streamUsage=IsDlgButtonChecked(state->provider,114)==BST_CHECKED;
+        state->authHeader=ControlText(state->provider,111);state->modelsUrl=ControlText(state->provider,112);
         state->systemPrompt=ControlText(state->prompt,501);
         state->modelTurns=ControlText(state->provider,108);state->toolCalls=ControlText(state->provider,109);
         ShowWindow(state->provider,SW_SHOW);ShowWindow(state->mcp,SW_HIDE);SetFocus(GetDlgItem(state->provider,101));return FALSE;
@@ -767,11 +782,15 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                 int turns=limit(modelTurns,100,"Maximum model turns must be between 1 and 100.");
                 int calls=limit(toolCalls,1000,"Maximum tool calls must be between 1 and 1000.");
                 auto systemPrompt=ControlText(state->prompt,501);
-                bool providerChanged=url!=state->url||key!=state->key||model!=state->model||modelTurns!=state->modelTurns||toolCalls!=state->toolCalls||systemPrompt!=state->systemPrompt;
+                auto authHeader=ControlText(state->provider,111),modelsUrl=ControlText(state->provider,112);
+                auto tokenLimitField=ControlText(state->provider,113);bool streamUsage=IsDlgButtonChecked(state->provider,114)==BST_CHECKED;
+                bool providerChanged=tokenLimitField!=state->tokenLimitField||streamUsage!=state->streamUsage||authHeader!=state->authHeader||modelsUrl!=state->modelsUrl||url!=state->url||key!=state->key||model!=state->model||modelTurns!=state->modelTurns||toolCalls!=state->toolCalls||systemPrompt!=state->systemPrompt;
                 auto mcp=nlohmann::json::parse(chat::Utf8(mcpText),nullptr,false);
                 if(mcp.is_discarded())throw std::runtime_error("Invalid MCP JSON. Check quotes, commas, and braces.");
                 chat::ValidateMcpConfig(mcp);
                 chat::Config config;config.url=chat::Utf8(url);config.key=chat::Utf8(key);config.model=chat::Utf8(model);
+                config.tokenLimitField=chat::Utf8(tokenLimitField);config.streamUsage=streamUsage;
+                config.authHeader=chat::Utf8(authHeader);config.modelsUrl=chat::Utf8(modelsUrl);
                 config.maxModelTurns=turns;config.maxToolCalls=calls;config.systemPrompt=chat::Utf8(systemPrompt);
                 if(providerChanged||state->selected==105)chat::ValidateConfig(config);
                 if(providerChanged||state->selected==105)chat::SaveConfig(configDirectory,config);

@@ -140,6 +140,9 @@ std::string BuildPayload(const Config& config, const std::vector<Message>& messa
     auto tools=Json::array({tool,Json::parse(ComputerDefinition())});
     for(const auto& definition:config.extraTools)tools.push_back(Json::parse(definition));
     Json payload{{"model", config.model}, {"messages", history}, {"max_tokens", 2048}, {"stream", true}, {"stream_options",{{"include_usage",true}}}, {"tools", tools}, {"tool_choice", "auto"}};
+    payload.erase("max_tokens");
+    if(config.tokenLimitField!="none")payload[config.tokenLimitField]=2048;
+    if(!config.streamUsage)payload.erase("stream_options");
     if(hasPdf&&InferenceEndpoint(config.url).host==L"openrouter.ai")
         payload["plugins"]=Json::array({{{"id","file-parser"},{"pdf",{{"engine","cloudflare-ai"}}}}});
     return payload.dump();
@@ -190,6 +193,9 @@ Endpoint InferenceEndpoint(const std::string& url) {
     auto extra=query==std::wstring::npos?L"":result.path.substr(query);
     if(query!=std::wstring::npos)result.path.resize(query);
     while(!result.path.empty()&&result.path.back()==L'/')result.path.pop_back();
+    auto host=result.host;for(auto& c:host)if(c>=L'A'&&c<=L'Z')c+=32;
+    auto azureRoot=[&](const std::wstring& suffix){return host.size()>suffix.size()&&host.compare(host.size()-suffix.size(),suffix.size(),suffix)==0;};
+    if(result.path.empty()&&(azureRoot(L".openai.azure.com")||azureRoot(L".services.ai.azure.com")||azureRoot(L".cognitiveservices.azure.com")))result.path=L"/openai/v1";
     const std::wstring suffix=L"/chat/completions";
     if(result.path.size()<suffix.size()||result.path.compare(result.path.size()-suffix.size(),suffix.size(),suffix)!=0)
         result.path+=suffix;
@@ -269,9 +275,24 @@ std::string McpHttpPost(const std::string& url,const std::vector<std::pair<std::
         return body;
     }catch(const Cancelled&){throw std::runtime_error("MCP request cancelled.");}
 }
+std::wstring ProviderAuthHeaders(const Config& config,const Endpoint& endpoint) {
+    auto header=config.authHeader;
+    auto normalized=header;for(auto& c:normalized)if(c>='A'&&c<='Z')c+=32;
+    if(config.key.empty()||normalized=="none")return {};
+    if(normalized=="auto") {
+        auto host=endpoint.host;for(auto& c:host)if(c>=L'A'&&c<=L'Z')c+=32;
+        auto ends=[&](const std::wstring& suffix){return host.size()>suffix.size()&&host.compare(host.size()-suffix.size(),suffix.size(),suffix)==0;};
+        header=ends(L".openai.azure.com")||ends(L".cognitiveservices.azure.com")||ends(L".services.ai.azure.com")?"api-key":"Authorization";
+    }
+    auto lower=header;for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return Wide(header)+L": "+(lower=="authorization"?L"Bearer ":L"")+Wide(config.key)+L"\r\n";
+}
 std::vector<std::string> FetchModels(const Config& config,const Cancellation& cancel) {
     ValidateConfig(config);
-    auto endpoint=InferenceEndpoint(config.url);
+    auto endpoint=config.modelsUrl.empty()?InferenceEndpoint(config.url):ProviderEndpoint(config.modelsUrl);
+    if(config.modelsUrl.empty()) {
+    if(endpoint.path.find(L"/deployments/")!=std::wstring::npos)
+        throw std::runtime_error("This deployment URL does not provide a model list. Enter your Azure deployment name manually, or configure a Models URL supplied by your provider.");
     auto query=endpoint.path.find(L'?');
     auto queryString=query==std::wstring::npos?L"":endpoint.path.substr(query);
     if(query!=std::wstring::npos)endpoint.path.resize(query);
@@ -280,6 +301,7 @@ std::vector<std::string> FetchModels(const Config& config,const Cancellation& ca
         endpoint.path.resize(endpoint.path.size()-suffix.size());
     else throw std::runtime_error("Use a URL ending in /chat/completions to load models.");
     endpoint.path+=L"/models"+queryString;
+    }
     HttpHandle session(WinHttpOpen(L"NativeCodexHarness/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,WINHTTP_FLAG_ASYNC));
     WinHttpSetTimeouts(session.value,10000,10000,10000,15000);
     HttpHandle connection(WinHttpConnect(session.value,endpoint.host.c_str(),endpoint.port,0));
@@ -293,7 +315,7 @@ std::vector<std::string> FetchModels(const Config& config,const Cancellation& ca
     DWORD redirects=WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     if(!WinHttpSetOption(request.handle,WINHTTP_OPTION_REDIRECT_POLICY,&redirects,sizeof(redirects)))AsyncRequest::Fail(GetLastError());
     std::wstring headers=L"Accept: application/json\r\n";
-    if(!config.key.empty())headers+=L"Authorization: Bearer "+Wide(config.key)+L"\r\n";
+    headers+=ProviderAuthHeaders(config,endpoint);
     auto deadline=GetTickCount64()+15000;
     try {
         request.Begin(cancel);request.Wait(WinHttpSendRequest(request.handle,headers.c_str(),static_cast<DWORD>(headers.size()),WINHTTP_NO_REQUEST_DATA,0,0,context),cancel,deadline);
@@ -334,8 +356,9 @@ Reply Complete(const Config& config, const std::vector<Message>& messages, const
         // Never forward a bearer token to another host through a redirect.
         DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         if (!WinHttpSetOption(request.handle, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect))) AsyncRequest::Fail(GetLastError());
-        std::wstring headers = L"Content-Type: application/json; charset=utf-8\r\nAccept: text/event-stream\r\nX-Title: Native Codex Harness\r\n";
-        if(!config.key.empty())headers+=L"Authorization: Bearer "+Wide(config.key)+L"\r\n";
+        std::wstring headers = L"Content-Type: application/json; charset=utf-8\r\nAccept: text/event-stream, application/json\r\n";
+        if(endpoint.host==L"openrouter.ai")headers+=L"X-Title: Native Codex Harness\r\n";
+        headers+=ProviderAuthHeaders(config,endpoint);
         if (config.key.find_first_of("\r\n") != config.key.npos) return {L"The API key contains an invalid newline."};
         auto deadline = GetTickCount64() + endpoint.timeoutMs;
         request.Begin(cancel);

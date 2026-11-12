@@ -9,6 +9,10 @@ struct Config {
     std::string key;
     std::string model = "openrouter/auto";
     std::string url = "https://openrouter.ai/api/v1/chat/completions";
+    std::string authHeader = "auto"; // auto, Authorization (Bearer), none, or a custom raw-key header.
+    std::string modelsUrl; // Optional exact model discovery URL.
+    std::string tokenLimitField = "max_tokens"; // max_completion_tokens for newer reasoning models, or none.
+    bool streamUsage = true;
     std::string systemPrompt = DefaultSystemPrompt();
     int maxModelTurns = 8;
     int maxToolCalls = 16;

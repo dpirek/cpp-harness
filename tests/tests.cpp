@@ -141,6 +141,22 @@ int main(int argc,char** argv) {
         invalidLimits=saved;invalidLimits.maxToolCalls=1001;rejectedLimit=false;try{ValidateConfig(invalidLimits);}catch(...){rejectedLimit=true;}Check(rejectedLimit,"Excessive tool limit rejected");
         {std::ifstream file(directory/L"provider-settings.json");auto old=nlohmann::json::parse(file);file.close();old.erase("max_model_turns");old.erase("max_tool_calls");old.erase("system_prompt");std::ofstream out(directory/L"provider-settings.json");out<<old.dump();}
         auto legacyLimits=LoadConfig(directory);Check(legacyLimits.maxModelTurns==8&&legacyLimits.maxToolCalls==16&&legacyLimits.systemPrompt==DefaultSystemPrompt(),"Older saved settings retain default run limits");
+        auto azure=saved;azure.authHeader="api-key";azure.tokenLimitField="max_completion_tokens";azure.streamUsage=false;azure.modelsUrl="http://localhost:8080/custom/catalog?api-version=example";
+        SaveConfig(directory,azure);auto azureRestored=LoadConfig(directory);
+        Check(azureRestored.authHeader=="api-key"&&azureRestored.modelsUrl==azure.modelsUrl&&azureRestored.tokenLimitField=="max_completion_tokens"&&!azureRestored.streamUsage,"Provider auth and exact models URL persist");
+        SaveConfig(directory,saved);
+        auto azureEndpoint=InferenceEndpoint("https://resource.openai.azure.com/openai/deployments/my-deployment/chat/completions?api-version=example");
+        Check(azureEndpoint.path==L"/openai/deployments/my-deployment/chat/completions?api-version=example","Azure deployment path and API version remain intact");
+        Check(InferenceEndpoint("https://resource.openai.azure.com").path==L"/openai/v1/chat/completions","Bare Azure OpenAI resource uses v1 route");
+        Check(InferenceEndpoint("https://resource.services.ai.azure.com/openai/v1/").path==L"/openai/v1/chat/completions","Foundry v1 base URL normalizes correctly");
+        auto authConfig=saved;
+        Check(ProviderAuthHeaders(authConfig,azureEndpoint)==L"api-key: settings-secret\r\n","Azure auto authentication uses api-key");
+        authConfig.authHeader="Authorization";
+        Check(ProviderAuthHeaders(authConfig,azureEndpoint)==L"Authorization: Bearer settings-secret\r\n","Azure Entra token supports explicit Bearer authentication");
+        authConfig.authHeader="Ocp-Apim-Subscription-Key";
+        Check(ProviderAuthHeaders(authConfig,azureEndpoint)==L"Ocp-Apim-Subscription-Key: settings-secret\r\n","Internal gateway supports custom authentication header");
+        authConfig.authHeader="none";Check(ProviderAuthHeaders(authConfig,azureEndpoint).empty(),"Explicit anonymous auth omits credential");
+        authConfig.authHeader="api-key\r\nInjected";bool invalidHeader=false;try{ValidateConfig(authConfig);}catch(...){invalidHeader=true;}Check(invalidHeader,"Authentication header injection rejected");
         auto parsedProvider=ProviderEndpoint(saved.url);
         Check(parsedProvider.host==L"localhost"&&parsedProvider.port==8080&&!parsedProvider.secure&&parsedProvider.path==L"/v1/chat/completions?version=1","Custom provider URL routing");
         bool badUrl=false;try{ProviderEndpoint("https://user:password@example.com/path");}catch(...){badUrl=true;}Check(badUrl,"Provider URL credentials rejected");
@@ -154,6 +170,10 @@ int main(int argc,char** argv) {
         Check(payload["messages"].size()==3,"Only system and valid history sent");
         Check(payload["stream"]==true,"Streaming requested from API");
         Check(payload["stream_options"]["include_usage"]==true,"Streaming token usage requested");
+        auto compatibility=config;compatibility.tokenLimitField="max_completion_tokens";compatibility.streamUsage=false;
+        auto compatiblePayload=nlohmann::json::parse(BuildPayload(compatibility,history));
+        Check(compatiblePayload.contains("max_completion_tokens")&&!compatiblePayload.contains("max_tokens")&&!compatiblePayload.contains("stream_options"),"Provider compatibility controls avoid unsupported token and usage fields");
+        compatibility.tokenLimitField="none";Check(!nlohmann::json::parse(BuildPayload(compatibility,history)).contains("max_completion_tokens"),"Provider can omit token limit field entirely");
         Check(payload["tools"][0]["function"]["name"]=="powershell","PowerShell function schema advertised");
         {
             auto document=directory/L"context.txt",image=directory/L"context.png",pdf=directory/L"context.pdf";
@@ -280,6 +300,12 @@ int main(int argc,char** argv) {
             bool detailed=false;try{FetchModels(rejectedModels,modelCancel);}catch(const std::exception& error){std::string text=error.what();detailed=text.find("422")!=text.npos&&text.find("loc")!=text.npos&&text.find("[redacted]")!=text.npos&&text.find("test-key")==text.npos;}Check(detailed,"Model HTTP 422 preserves validation response and redacts key");
             auto queryProvider=provider;queryProvider.url+="?version=required";
             Check(FetchModels(queryProvider,modelCancel)==models,"Model discovery preserves query parameters");
+            auto corporate=provider;corporate.authHeader="api-key";
+            corporate.url="http://127.0.0.1:"+std::string(argv[1])+"/openai/deployments/corporate/chat/completions?api-version=fixture";
+            corporate.modelsUrl="http://127.0.0.1:"+std::string(argv[1])+"/corporate/catalog?api-version=fixture";
+            Check(FetchModels(corporate,modelCancel)==std::vector<std::string>({"corporate"}),"Corporate model discovery uses exact URL query and api-key header");
+            corporate.model="corporate";Check(Complete(corporate,history,modelCancel).ok,"Azure deployment inference uses api-key and preserves API version");
+            corporate.modelsUrl.clear();bool manualDeployment=false;try{FetchModels(corporate,modelCancel);}catch(const std::exception& error){manualDeployment=std::string(error.what()).find("deployment name manually")!=std::string::npos;}Check(manualDeployment,"Legacy Azure deployment avoids invalid model discovery route");
             auto local=provider;local.key.clear();local.url="http://127.0.0.1:"+std::string(argv[1])+"/keyless/";
             Check(FetchModels(local,modelCancel)==std::vector<std::string>({"local-model"}),"Keyless base URL discovery omits authorization");
             Check(Complete(local,history,modelCancel).ok,"Keyless base URL inference omits authorization");

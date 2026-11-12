@@ -26,17 +26,24 @@ std::string Environment(const wchar_t* name) {
 }
 }
 void ValidateConfig(const Config& config,bool requireKey) {
+    if(config.tokenLimitField!="max_tokens"&&config.tokenLimitField!="max_completion_tokens"&&config.tokenLimitField!="none")throw std::runtime_error("Token limit field must be max_tokens, max_completion_tokens, or none.");
     if(config.systemPrompt.size()>131072||config.systemPrompt.find('\0')!=config.systemPrompt.npos)throw std::runtime_error("System prompt must be at most 128 KiB and cannot contain null characters.");
     if(config.maxModelTurns<1||config.maxModelTurns>100)throw std::runtime_error("Maximum model turns must be between 1 and 100.");
     if(config.maxToolCalls<1||config.maxToolCalls>1000)throw std::runtime_error("Maximum tool calls must be between 1 and 1000.");
     if(requireKey&&config.key.empty())throw std::runtime_error("Open Settings and enter an API key.");
     if(config.key.find_first_of("\r\n")!=config.key.npos)throw std::runtime_error("The API key contains an invalid newline.");
+    if(config.key.find('\0')!=config.key.npos)throw std::runtime_error("The API key contains a null character.");
+    if(config.authHeader.empty()||config.authHeader.size()>128||config.authHeader.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~")!=config.authHeader.npos)
+        throw std::runtime_error("Enter a valid authentication header name, auto, or none.");
+    std::string header=config.authHeader;for(auto& c:header)if(c>='A'&&c<='Z')c+=32;
+    if(header=="host"||header=="content-length"||header=="transfer-encoding"||header=="connection"||header=="content-type"||header=="accept")throw std::runtime_error("Choose an authentication header, such as Authorization or api-key.");
     if(Trim(config.model).empty())throw std::runtime_error("Enter a model ID.");
     auto url=Wide(config.url);URL_COMPONENTS parts{};parts.dwStructSize=sizeof(parts);
     parts.dwHostNameLength=parts.dwUserNameLength=parts.dwPasswordLength=parts.dwUrlPathLength=parts.dwExtraInfoLength=static_cast<DWORD>(-1);
     if(config.url.find_first_of("\r\n\t ")!=config.url.npos||!WinHttpCrackUrl(url.c_str(),0,0,&parts)||
        (parts.nScheme!=INTERNET_SCHEME_HTTP&&parts.nScheme!=INTERNET_SCHEME_HTTPS)||!parts.dwHostNameLength||parts.dwUserNameLength||parts.dwPasswordLength||config.url.find('#')!=config.url.npos)
         throw std::runtime_error("Enter a valid HTTP or HTTPS chat completions URL without credentials or a fragment.");
+    if(!config.modelsUrl.empty()){auto models=config;models.url=config.modelsUrl;models.modelsUrl.clear();ValidateConfig(models,false);}
 }
 void SaveConfig(const std::filesystem::path& directory,const Config& config) {
     ValidateConfig(config);
@@ -44,6 +51,8 @@ void SaveConfig(const std::filesystem::path& directory,const Config& config) {
     if(!CryptProtectData(&input,L"Chat provider key",nullptr,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&encrypted))throw std::runtime_error("Could not protect the API key.");
     std::vector<unsigned char> bytes(encrypted.pbData,encrypted.pbData+encrypted.cbData);LocalFree(encrypted.pbData);
     auto json=nlohmann::json{{"url",config.url},{"model",config.model},{"protected_key",bytes},{"max_model_turns",config.maxModelTurns},{"max_tool_calls",config.maxToolCalls},{"system_prompt",config.systemPrompt}};
+    json["auth_header"]=config.authHeader;json["models_url"]=config.modelsUrl;
+    json["token_limit_field"]=config.tokenLimitField;json["stream_usage"]=config.streamUsage;
     auto temporary=directory/L"provider-settings.json.tmp",destination=directory/L"provider-settings.json";
     {std::ofstream file(temporary,std::ios::binary|std::ios::trunc);file<<json.dump(2);file.flush();if(!file)throw std::runtime_error("Could not save provider settings.");}
     if(!MoveFileExW(temporary.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Could not replace provider settings.");
@@ -54,6 +63,8 @@ Config LoadConfig(const std::filesystem::path& directory,bool requireKey) {
         try {
             std::ifstream file(settings,std::ios::binary);auto json=nlohmann::json::parse(file);
             Config config;config.url=json.at("url").get<std::string>();config.model=json.at("model").get<std::string>();
+            config.authHeader=json.value("auth_header",std::string("auto"));config.modelsUrl=json.value("models_url",std::string());
+            config.tokenLimitField=json.value("token_limit_field",std::string("max_tokens"));config.streamUsage=json.value("stream_usage",true);
             if(json.contains("system_prompt"))config.systemPrompt=json.at("system_prompt").get<std::string>();
             auto readLimit=[&](const char* name,int fallback,int maximum){
                 if(!json.contains(name))return fallback;
@@ -103,6 +114,10 @@ Config LoadConfig(const std::filesystem::path& directory,bool requireKey) {
     if(!model.empty())config.model=model;
     auto url=resolve({{L"AI_BASE_URL","AI_BASE_URL"},{L"AI_PROVIDER_URL","AI_PROVIDER_URL"}});
     if(!url.empty())config.url=url;
+    auto auth=resolve({{L"AI_AUTH_HEADER","AI_AUTH_HEADER"}});if(!auth.empty())config.authHeader=auth;
+    config.modelsUrl=resolve({{L"AI_MODELS_URL","AI_MODELS_URL"}});
+    auto tokenField=resolve({{L"AI_TOKEN_LIMIT_FIELD","AI_TOKEN_LIMIT_FIELD"}});if(!tokenField.empty())config.tokenLimitField=tokenField;
+    auto usage=resolve({{L"AI_STREAM_USAGE","AI_STREAM_USAGE"}});if(!usage.empty()){if(usage!="true"&&usage!="false")throw std::runtime_error("AI_STREAM_USAGE must be true or false.");config.streamUsage=usage=="true";}
     ValidateConfig(config,requireKey);
     return config;
 }
