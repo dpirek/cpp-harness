@@ -37,7 +37,7 @@ std::wstring McpDisplay(const nlohmann::json& result) {
 }
 }
 AgentResult RunAgent(const Config& config,std::vector<Message> history,const std::filesystem::path& directory,
-    const Cancellation& cancel,const Endpoint& endpoint,const OnAgentUpdate& onUpdate) {
+    const Cancellation& cancel,const Endpoint& endpoint,const OnAgentUpdate& onUpdate,const std::filesystem::path& workspace) {
     ValidateConfig(config);
     AgentResult result;int totalTools=0;
     CallMetrics metrics;metrics.model=Wide(config.model);auto started=GetTickCount64();
@@ -46,8 +46,9 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
     auto status=[&](const std::wstring& state){auto current=metrics;current.elapsedMs=GetTickCount64()-started;emit(UpdateKind::Status,CallActivity(current,state));};
     std::unique_ptr<McpClient> mcp;
     Config requestConfig=config;
+    const auto& workingDirectory=workspace.empty()?directory:workspace;
     try {
-        mcp=std::make_unique<McpClient>(LoadMcpConfig(directory),directory,cancel,[&](const std::wstring& text){emit(UpdateKind::Tool,text);});
+        mcp=std::make_unique<McpClient>(LoadMcpConfig(directory),workingDirectory,cancel,[&](const std::wstring& text){emit(UpdateKind::Tool,text);});
         requestConfig.extraTools=mcp->Definitions();
     }catch(const std::exception& error){emit(UpdateKind::Tool,Wide(error.what()));}
     for(int round=0;round<config.maxModelTurns;++round) {
@@ -111,7 +112,7 @@ AgentResult RunAgent(const Config& config,std::vector<Message> history,const std
                     auto command=Wide(args["command"].get<std::string>());
                     status(L"PowerShell running \u00b7 Command "+std::to_wstring(totalTools));
                     emit(UpdateKind::Tool,L"```powershell\n"+command+L"\n```");
-                    auto tool=RunPowerShell(command,directory,cancel,static_cast<unsigned>(timeout));
+                    auto tool=RunPowerShell(command,workingDirectory,cancel,static_cast<unsigned>(timeout));
                     if(tool.cancelled){result.reply.cancelled=true;break;}
                     Redact(tool.output,key);
                     output={{"output",Utf8(tool.output)},{"exit_code",tool.exitCode},{"timed_out",tool.timedOut},{"truncated",tool.truncated}};

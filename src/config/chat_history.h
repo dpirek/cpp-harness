@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <set>
+#include <random>
 
 namespace chat {
 struct SavedChat {
@@ -15,6 +16,25 @@ struct ChatHistory {
     std::string activeId;
     std::vector<SavedChat> chats;
 };
+inline bool ValidChatId(const std::string& id) {
+    return id.size()==5&&id.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")==id.npos;
+}
+inline std::filesystem::path ChatWorkspace(const std::filesystem::path& directory,const std::string& id) {
+    if(!ValidChatId(id))throw std::runtime_error("Invalid chat workspace ID.");
+    auto path=directory/L".workspace"/id;std::filesystem::create_directories(path);return path;
+}
+inline SavedChat NewSavedChat(const std::filesystem::path& directory,const ChatHistory& history) {
+    static constexpr char alphabet[]="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    std::random_device random;
+    for(int attempt=0;attempt<100;++attempt) {
+        std::string id;for(int i=0;i<5;++i)id+=alphabet[random()%62];
+        bool exists=false;for(const auto& chat:history.chats)if(chat.id==id)exists=true;
+        if(exists||std::filesystem::exists(directory/L".workspace"/id))continue;
+        std::filesystem::create_directories(directory/L".workspace");
+        if(std::filesystem::create_directory(directory/L".workspace"/id))return {id,L"New conversation",{},{},{}};
+    }
+    throw std::runtime_error("Could not allocate a unique chat workspace.");
+}
 inline nlohmann::json HistoryMessages(const std::vector<Message>& messages) {
     auto result=nlohmann::json::array();
     for(const auto& message:messages) {
@@ -51,7 +71,7 @@ inline ChatHistory LoadChatHistory(const std::filesystem::path& directory) {
         ChatHistory result;result.activeId=json.at("active_chat_id").get<std::string>();std::set<std::string> ids;
         for(const auto& item:json.at("chats")) {
             SavedChat chat;chat.id=item.at("id").get<std::string>();
-            if(chat.id.empty()||!ids.insert(chat.id).second)throw std::runtime_error("Invalid chat ID.");
+            if(!ValidChatId(chat.id)||!ids.insert(chat.id).second)throw std::runtime_error("Invalid chat ID.");
             chat.title=Wide(item.at("title").get<std::string>());chat.draft=Wide(item.value("draft",std::string{}));
             chat.messages=ReadHistoryMessages(item.at("messages"),false);chat.context=ReadHistoryMessages(item.at("context"),true);
             result.chats.push_back(std::move(chat));

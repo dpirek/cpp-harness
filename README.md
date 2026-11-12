@@ -1,6 +1,6 @@
 # Native agent chat harness
 
-A Win32 C++ desktop chat app styled after `docs/image.png`. It launches maximized with a 48 DIP custom dark title bar, square window controls, and a dark sidebar, rounded user messages, and a rectangular prompt box with a Send icon button on the right. The prompt begins as one line, expands upward as text wraps or newlines are added, and scrolls internally after six lines. It shrinks again when text is removed. Enter or the Send button sends; Shift+Enter inserts a newline. While the agent runs, Send becomes Stop. Stop cancels the current operation, keeps partial text and your draft, and restores Send; completed filesystem changes remain. New chat clears the conversation and cancels the active request. Scroll with the mouse wheel.
+A Win32 C++ desktop chat app styled after `docs/image.png`. It launches maximized with a 48 DIP custom dark title bar, square window controls, and a dark sidebar, rounded user messages, and a rectangular prompt box with a Send icon button on the right. The prompt begins as one line, expands upward as text wraps or newlines are added, and scrolls internally after six lines. It shrinks again when text is removed. Enter or the Send button sends; Shift+Enter inserts a newline. While the agent runs, Send becomes Stop. Stop cancels the current operation, keeps partial text and your draft, and restores Send; completed filesystem changes remain. New chat saves the current conversation, cancels its active request, and opens a new conversation with its own workspace. Scroll with the mouse wheel.
 
 ## Build and run
 
@@ -21,7 +21,7 @@ Settings, MCP settings, and message dialogs use square window corners and the ma
 
 Drag files from Explorer onto the window or prompt to attach them to your next message. Pending filenames appear above the prompt; the × button removes pending attachments. Send with or without a text prompt. Sent filenames remain in the user message in chat history, and their contents stay in the model context for follow-ups. Dropping files during a run queues them for your next message. New chat clears attachments and history.
 
-Supported attachments are PNG, JPEG, GIF, WebP, PDF, and UTF-8/UTF-16 text and source documents (including TXT, Markdown, CSV, JSON, XML, logs, and common programming languages). Text documents are combined with the prompt as ordinary string content for compatibility with text-only providers; mixed attachments use content parts. Images use Chat Completions `image_url` data URLs and require a vision-capable model. PDFs use `file` parts with `filename` and base64 `file_data`. On OpenRouter, PDF requests explicitly enable the free Cloudflare text parser so text-only models can read extracted text; scanned pages may require OCR or a vision-capable model. Other providers must support PDF file parts themselves. Catalog access alone does not establish attachment support. Rejected attachment requests show model compatibility or size guidance. Export Office documents to PDF or text first. Up to 8 files per message, 10 MiB per file, 1 MiB per text document, and 32 MiB of attachments per conversation are allowed. File contents are captured at drop time, kept in memory, and sent to your configured provider only when you send the message. The app does not persist conversations or attachments.
+Supported attachments are PNG, JPEG, GIF, WebP, PDF, and UTF-8/UTF-16 text and source documents (including TXT, Markdown, CSV, JSON, XML, logs, and common programming languages). Text documents are combined with the prompt as ordinary string content for compatibility with text-only providers; mixed attachments use content parts. Images use Chat Completions `image_url` data URLs and require a vision-capable model. PDFs use `file` parts with `filename` and base64 `file_data`. On OpenRouter, PDF requests explicitly enable the free Cloudflare text parser so text-only models can read extracted text; scanned pages may require OCR or a vision-capable model. Other providers must support PDF file parts themselves. Catalog access alone does not establish attachment support. Rejected attachment requests show model compatibility or size guidance. Export Office documents to PDF or text first. Up to 8 files per message, 10 MiB per file, 1 MiB per text document, and 32 MiB of attachments per conversation are allowed. File contents are captured at drop time, kept in memory, and sent to your configured provider only when you send the message. Conversations and sent attachments are saved locally in `chat-history.json`.
 
 Assistant responses render Markdown natively: headings, bold/italic/strikethrough text, inline code, nested lists, task lists, blockquotes, horizontal rules, tables, and clickable HTTP/HTTPS/email links. Fenced and indented code blocks preserve whitespace; PowerShell, XML, and JSON syntax highlighting remains available. Partial Markdown is parsed as responses stream. User prompts and tool logs keep their original text formatting. HTML appears as literal text, and Markdown images show their alt text without downloading images.
 
@@ -146,6 +146,16 @@ The client uses asynchronous WinHTTP handles internally so it can cancel in-flig
 
 ## Tests
 
+Launch the native Windows test dashboard with:
+
+```powershell
+.\test-ui.cmd
+```
+
+Build the app and test executable first (`.\build.cmd` and `.\build.cmd test`), or enter your CMake executable paths in the dashboard. Select **Run selected suite** to run one suite, or **Run all suites** to execute all three sequentially. The dashboard shows suite descriptions, colored pass/fail status, elapsed time, live C++ assertion results, and process output. **Stop** terminates the running process tree; **Save report** exports the current run as JSON. A missing executable or dependency is reported as a failed suite with an explanation. Desktop suites require an unlocked interactive desktop and may move the pointer or take focus. The live paid API smoke test is excluded.
+
+Individual C++ assertions currently share setup and execute sequentially inside the core suite; the dashboard runs suites individually and displays each assertion as it completes. C++ execution stops at the first failure, so later assertions have not run. The app executable path is also used for the UI/mock API suite.
+
 ```powershell
 .\build.cmd test
 ```
@@ -171,3 +181,9 @@ MCP tests use `tests/mock_mcp.cjs` for stdio and the mock HTTP server for sessio
 Responses support fenced code blocks with preserved indentation, monospace text, and language labels. PowerShell (powershell, pwsh, ps, ps1) XML/HTML, and JSON blocks include syntax highlighting. Long code lines wrap to the conversation width. Executed PowerShell commands use the same code formatting.
 
 
+
+## Local chat history and workspaces
+
+Conversations, tool results, sent attachments, and text drafts are stored in `chat-history.json` beside `mcp-servers.json` and provider settings. The latest active chat is restored on startup. Select a conversation in the sidebar (or the **Chats** menu on the compact rail) to continue it; switching chats stops an active run. New chat preserves earlier conversations. History is written through a temporary JSON file and replaced atomically. If existing history cannot be read, the app reports the error and leaves that file unchanged.
+
+Each chat gets a unique five-character alphanumeric ID and a `.workspace/<ID>/` directory beside the settings files. PowerShell commands and local MCP servers start in that chat?s workspace. **Open workspace** in the sidebar opens its files in Explorer. Tool access remains governed by your Windows permissions; the workspace is a working directory, not a filesystem sandbox. History and attachments are local JSON data, not encrypted; the history file and workspace directories are excluded from Git.

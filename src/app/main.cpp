@@ -21,12 +21,14 @@
 #include "common/text_encoding.h"
 #include "tools/mcp_client.h"
 #include "tools/computer_tool.h"
+#include "config/chat_history.h"
 
 namespace {
 constexpr COLORREF Background=RGB(24,24,24), Panel=RGB(31,31,31), Surface=RGB(36,36,36);
 constexpr COLORREF ModalHeader=RGB(44,44,44);
 constexpr COLORREF Ink=RGB(240,240,240), Muted=RGB(148,148,148), Border=RGB(48,48,48);
 constexpr int Header=48, Space=24, MaxPromptLines=6;
+HWND historyList,workspaceButton,historyButton;
 HWND app,input,newButton,settingsButton,sidebarToggle,sendButton,clearAttachmentsButton,navTooltips,minButton,maxButton,closeButton;
 HFONT bodyFont,labelFont,headingFont,smallFont,codeFont,navIconFont,captionIconFont;
 HANDLE iconFontResource=nullptr;
@@ -47,6 +49,11 @@ std::vector<chat::Message> messages;
 std::vector<chat::Message> apiHistory;
 std::vector<chat::Attachment> pendingAttachments;
 std::unique_ptr<chat::ChatWorker> worker;
+chat::ChatHistory savedHistory;
+bool historyWritable=true,restoringChat=false;
+std::wstring historyError;
+void StopAgent();
+int ShowModalMessage(HWND,const wchar_t*,const wchar_t*,UINT);
 struct LayoutRects { RECT client{},sidebar{},column{},conversation{},composer{}; } layout;
 int Px(int value) { return MulDiv(value,static_cast<int>(dpi),96); }
 void Fill(HDC dc,RECT rect,COLORREF color) { auto brush=CreateSolidBrush(color);FillRect(dc,&rect,brush);DeleteObject(brush); }
@@ -123,6 +130,11 @@ void Layout() {
     layout.conversation={left,Px(Header+Space),left+columnWidth,layout.composer.top-Px(Space)};
     // A 40 DIP icon button has 16 DIP clearance around its hover rectangle.
     int iconLeft=sidebarWide?sideWidth-Px(56):(sideWidth-Px(40))/2;
+    MoveWindow(historyButton,0,Px(Header+72+56+8),Px(72),Px(40),TRUE);ShowWindow(historyButton,sidebarWide?SW_HIDE:SW_SHOW);
+    MoveWindow(historyList,Px(12),Px(Header+72+56+60),std::max(1,sideWidth-Px(24)),std::max(1,height-Px(Header+72+56+60+112)),TRUE);
+    ShowWindow(historyList,sidebarWide?SW_SHOW:SW_HIDE);
+    MoveWindow(workspaceButton,Px(12),height-Px(104),std::max(1,sideWidth-Px(24)),Px(32),TRUE);
+    ShowWindow(workspaceButton,sidebarWide?SW_SHOW:SW_HIDE);
     MoveWindow(newButton,0,Px(Header+72),sideWidth,Px(56),TRUE);
     MoveWindow(settingsButton,iconLeft,height-Px(56),Px(40),Px(40),TRUE);
     MoveWindow(sidebarToggle,iconLeft,Px(Header+16),Px(40),Px(40),TRUE);
@@ -141,11 +153,47 @@ void Layout() {
     SetWindowTextW(maxButton,IsZoomed(app)?L"Restore":L"Maximize");
     InvalidateRect(app,nullptr,TRUE);
 }
+void RefreshChats() {
+    if(!historyList)return;
+    SendMessageW(historyList,LB_RESETCONTENT,0,0);
+    for(size_t i=0;i<savedHistory.chats.size();++i) {
+        SendMessageW(historyList,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(savedHistory.chats[i].title.c_str()));
+        if(savedHistory.chats[i].id==savedHistory.activeId)SendMessageW(historyList,LB_SETCURSEL,i,0);
+    }
+    InvalidateRect(historyList,nullptr,TRUE);
+}
+void PersistChat() {
+    try {
+        if(savedHistory.activeId.empty()) {
+            auto item=chat::NewSavedChat(configDirectory,savedHistory);savedHistory.activeId=item.id;savedHistory.chats.insert(savedHistory.chats.begin(),std::move(item));
+        }
+        for(auto& item:savedHistory.chats)if(item.id==savedHistory.activeId) {
+            item.messages=messages;item.context=apiHistory;
+            int length=GetWindowTextLengthW(input);std::wstring draft(length+1,L'\0');GetWindowTextW(input,draft.data(),length+1);draft.resize(length);item.draft=std::move(draft);
+            for(const auto& m:messages)if(m.role==L"user"){item.title=m.text.substr(0,80);break;}
+            std::replace(item.title.begin(),item.title.end(),L'\n',L' ');std::replace(item.title.begin(),item.title.end(),L'\r',L' ');
+        }
+        if(historyWritable)chat::SaveChatHistory(configDirectory,savedHistory);
+        RefreshChats();
+    }catch(const std::exception& error){historyError=chat::Wide(error.what());PostMessageW(app,WM_APP+2,0,0);}
+}
+void OpenChat(size_t index) {
+    if(index>=savedHistory.chats.size())return;
+    auto id=savedHistory.chats[index].id;
+    if(id==savedHistory.activeId)return;
+    if(busy)StopAgent();else PersistChat();
+    ++generation;streamingMessage.reset();currentPrompt.reset();pendingAttachments.clear();
+    for(const auto& item:savedHistory.chats)if(item.id==id) {
+        messages=item.messages;apiHistory=item.context;restoringChat=true;SetWindowTextW(input,item.draft.c_str());restoringChat=false;break;
+    }
+    savedHistory.activeId=id;scroll=1000000;PersistChat();Layout();SetFocus(input);
+}
 void Reset() {
+    if(busy)StopAgent();else PersistChat();
     worker->Cancel();++generation;busy=false;streamingMessage.reset();currentPrompt.reset();messages.clear();apiHistory.clear();scroll=0;
     pendingAttachments.clear();
     SetWindowTextW(sendButton,L"Send message");InvalidateRect(sendButton,nullptr,TRUE);
-    SetWindowTextW(input,L"");InvalidateRect(app,nullptr,TRUE);SetFocus(input);
+    restoringChat=true;SetWindowTextW(input,L"");restoringChat=false;savedHistory.activeId.clear();PersistChat();InvalidateRect(app,nullptr,TRUE);SetFocus(input);
 }
 void InitModalChrome(HWND window,const wchar_t* title,int contentWidth,int contentHeight);
 int ShowModalMessage(HWND owner,const wchar_t* text,const wchar_t* title,UINT type);
@@ -551,7 +599,8 @@ void Send() {
     if(!request.attachments.empty())display+=(display.empty()?L"":L"\n\n")+std::wstring(L"Attached: ")+chat::AttachmentNames(request.attachments);
     currentPrompt=messages.size();messages.push_back({L"user",display});messages.back().activity=L"LLM call \u00b7 Preparing request";
     apiHistory.push_back(std::move(request));SetWindowTextW(input,L"");busy=true;streamingMessage.reset();scroll=1000000;
-    try {worker->Start(apiHistory,generation);}catch(...){busy=false;messages[*currentPrompt].activity=L"LLM call \u00b7 Failed";messages.push_back({L"error",L"Unable to start the AI request. Please try again."});}
+    PersistChat();
+    try {worker->Start(apiHistory,generation,chat::ChatWorkspace(configDirectory,savedHistory.activeId));}catch(...){busy=false;messages[*currentPrompt].activity=L"LLM call \u00b7 Failed";messages.push_back({L"error",L"Unable to start the AI request. Please try again."});}
     SetWindowTextW(sendButton,busy?L"Stop agent":L"Send message");InvalidateRect(sendButton,nullptr,TRUE);
     InvalidateRect(app,nullptr,TRUE);
 }
@@ -562,7 +611,7 @@ void StopAgent() {
     if(currentPrompt)messages[*currentPrompt].activity=L"Stopped";
     streamingMessage.reset();currentPrompt.reset();
     SetWindowTextW(sendButton,L"Send message");InvalidateRect(sendButton,nullptr,TRUE);
-    InvalidateRect(app,nullptr,TRUE);SetFocus(input);
+    PersistChat();InvalidateRect(app,nullptr,TRUE);SetFocus(input);
 }
 LRESULT CALLBACK InputProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     if(message==WM_DROPFILES)return SendMessageW(app,message,wParam,lParam);
@@ -733,10 +782,7 @@ void Paint(HDC dc) {
     Line(dc,0,Px(Header)-1,r.client.right,Px(Header)-1);
     Line(dc,sideWidth,Px(Header),sideWidth,r.client.bottom);
     int sectionTop=Px(Header+72+56+32);
-    if(sidebarWide)Text(dc,L"CURRENT CHAT",{Px(Space+16),sectionTop,sideWidth-Px(Space+16),sectionTop+Px(20)},labelFont,Muted,DT_SINGLELINE|DT_NOPREFIX);
-    std::wstring label=messages.empty()?L"New conversation":messages.front().text;
-    std::replace(label.begin(),label.end(),L'\n',L' ');std::replace(label.begin(),label.end(),L'\r',L' ');
-    if(sidebarWide)Text(dc,label,{Px(Space+16),sectionTop+Px(28),sideWidth-Px(Space+16),sectionTop+Px(52)},bodyFont,Ink,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    if(sidebarWide)Text(dc,L"CHAT HISTORY",{Px(24),sectionTop,sideWidth-Px(24),sectionTop+Px(20)},labelFont,Muted,DT_SINGLELINE|DT_NOPREFIX);
     SaveDC(dc);IntersectClipRect(dc,r.conversation.left,r.conversation.top,r.conversation.right,r.conversation.bottom);
     if(messages.empty()) {
         int top=r.conversation.top;
@@ -915,6 +961,12 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         surfaceBrush=CreateSolidBrush(Surface);CreateFonts();
         auto button=[&](const wchar_t* name,int id){HWND control=CreateWindowW(L"BUTTON",name,WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);auto original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc)));if(!oldButtonProc)oldButtonProc=original;return control;};
         newButton=button(L"New chat",1);settingsButton=button(L"Settings",2);sidebarToggle=button(L"Collapse sidebar",4);sendButton=button(L"Send message",5);minButton=button(L"Minimize",10);maxButton=button(L"Restore",11);closeButton=button(L"Close",12);
+        historyList=CreateWindowW(L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS|LBS_NOINTEGRALHEIGHT,0,0,0,0,window,reinterpret_cast<HMENU>(7),instance,nullptr);
+        SendMessageW(historyList,LB_SETITEMHEIGHT,0,Px(36));
+        historyButton=CreateWindowW(L"BUTTON",L"Chats",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,window,reinterpret_cast<HMENU>(9),instance,nullptr);
+        SendMessageW(historyButton,WM_SETFONT,reinterpret_cast<WPARAM>(smallFont),TRUE);
+        workspaceButton=CreateWindowW(L"BUTTON",L"Open workspace",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,window,reinterpret_cast<HMENU>(8),instance,nullptr);
+        SendMessageW(workspaceButton,WM_SETFONT,reinterpret_cast<WPARAM>(smallFont),TRUE);
         clearAttachmentsButton=button(L"Remove attachments",6);ShowWindow(clearAttachmentsButton,SW_HIDE);
         INITCOMMONCONTROLSEX commonControls{sizeof(commonControls),ICC_WIN95_CLASSES};InitCommonControlsEx(&commonControls);
         navTooltips=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,nullptr,instance,nullptr);
@@ -926,7 +978,12 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         SendMessageW(input,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);SendMessageW(input,EM_SETLIMITTEXT,12000,0);
         SendMessageW(input,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,0);
         oldInputProc=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(input,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(InputProc)));
-        DragAcceptFiles(window,TRUE);DragAcceptFiles(input,TRUE);
+        try {
+            savedHistory=chat::LoadChatHistory(configDirectory);
+            for(const auto& item:savedHistory.chats)if(item.id==savedHistory.activeId){messages=item.messages;apiHistory=item.context;restoringChat=true;SetWindowTextW(input,item.draft.c_str());restoringChat=false;chat::ChatWorkspace(configDirectory,item.id);break;}
+            PersistChat();scroll=1000000;
+        }catch(const std::exception& error){historyWritable=false;historyError=chat::Wide(error.what());PostMessageW(window,WM_APP+2,0,0);PersistChat();}
+        RefreshChats();DragAcceptFiles(window,TRUE);DragAcceptFiles(input,TRUE);
         return 0;
     }
     case WM_DPICHANGED: {
@@ -936,10 +993,19 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
     case WM_SIZE:Layout();return 0;
     case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize={Px(360),Px(540)};return 0;
     case WM_COMMAND:
+        if(LOWORD(wParam)==9&&HIWORD(wParam)==BN_CLICKED){
+            auto menu=CreatePopupMenu();
+            AppendMenuW(menu,MF_STRING,999,L"Open workspace");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+            for(size_t i=0;i<savedHistory.chats.size();++i){auto label=savedHistory.chats[i].title;size_t at=0;while((at=label.find(L'&',at))!=label.npos){label.insert(at,1,L'&');at+=2;}AppendMenuW(menu,MF_STRING|(savedHistory.chats[i].id==savedHistory.activeId?MF_CHECKED:0),1000+i,label.c_str());}
+            RECT rect{};GetWindowRect(historyButton,&rect);auto choice=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN,rect.right,rect.top,0,window,nullptr);DestroyMenu(menu);
+            if(choice==999)SendMessageW(window,WM_COMMAND,8,0);else if(choice>=1000)OpenChat(choice-1000);return 0;
+        }
+        if(LOWORD(wParam)==7&&HIWORD(wParam)==LBN_SELCHANGE){auto index=SendMessageW(historyList,LB_GETCURSEL,0,0);if(index!=LB_ERR)OpenChat(static_cast<size_t>(index));return 0;}
+        if(LOWORD(wParam)==8&&HIWORD(wParam)==BN_CLICKED){try{auto path=chat::ChatWorkspace(configDirectory,savedHistory.activeId);ShellExecuteW(window,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL);}catch(const std::exception& error){ShowModalMessage(window,chat::Wide(error.what()).c_str(),L"Workspace",MB_OK|MB_ICONERROR);}return 0;}
         if(LOWORD(wParam)==6&&HIWORD(wParam)==BN_CLICKED){pendingAttachments.clear();Layout();SetFocus(input);return 0;}
         if(LOWORD(wParam)==4){sidebarExpanded=!sidebarExpanded;Layout();return 0;}
         if(HIWORD(wParam)==BN_CLICKED){switch(LOWORD(wParam)){case 1:Reset();break;case 2:OpenSettings();break;case 5:if(busy)StopAgent();else Send();break;case 10:ShowWindow(window,SW_MINIMIZE);break;case 11:ShowWindow(window,IsZoomed(window)?SW_RESTORE:SW_MAXIMIZE);break;case 12:PostMessageW(window,WM_CLOSE,0,0);break;}}
-        if(HIWORD(wParam)==EN_CHANGE){Layout();InvalidateRect(input,nullptr,FALSE);}
+        if(HIWORD(wParam)==EN_CHANGE){Layout();InvalidateRect(input,nullptr,FALSE);if(LOWORD(wParam)==3&&!restoringChat)SetTimer(window,9,700,nullptr);}
         return 0;
     case WM_NOTIFY: {
         auto notification=reinterpret_cast<NMHDR*>(lParam);
@@ -999,10 +1065,12 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
                 messages.push_back({result->reply.ok?L"assistant":L"error",std::move(result->reply.text)});
             }
             streamingMessage.reset();
-            currentPrompt.reset();
+            currentPrompt.reset();PersistChat();
         }
         scroll=1000000;InvalidateRect(window,nullptr,FALSE);return 0;
     }
+    case WM_APP+2:if(!historyError.empty()){auto error=std::move(historyError);historyError.clear();ShowModalMessage(window,error.c_str(),L"Chat history",MB_OK|MB_ICONERROR);}return 0;
+    case WM_TIMER:if(wParam==9){KillTimer(window,9);PersistChat();return 0;}break;
     case WM_MOUSEWHEEL:scroll-=GET_WHEEL_DELTA_WPARAM(wParam)/WHEEL_DELTA*Px(64);InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_LBUTTONUP: {
         POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
@@ -1014,14 +1082,20 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(LOWORD(lParam)==HTCLIENT&&PtInRect(&layout.conversation,point))for(const auto& link:responseLinks)if(PtInRect(&link.rect,point)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
         break;
     }
+    case WM_CTLCOLORLISTBOX:SetTextColor(reinterpret_cast<HDC>(wParam),Ink);SetBkColor(reinterpret_cast<HDC>(wParam),Background);SetDCBrushColor(reinterpret_cast<HDC>(wParam),Background);return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
     case WM_CTLCOLOREDIT:SetTextColor(reinterpret_cast<HDC>(wParam),Ink);SetBkColor(reinterpret_cast<HDC>(wParam),Surface);return reinterpret_cast<LRESULT>(surfaceBrush);
-    case WM_DRAWITEM:DrawButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam));return TRUE;
+    case WM_DRAWITEM: {
+        auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+        if(wParam==7){Fill(item.hDC,item.rcItem,(item.itemState&ODS_SELECTED)?Surface:Background);if(item.itemID<savedHistory.chats.size()){auto rect=item.rcItem;rect.left+=Px(12);rect.right-=Px(8);Text(item.hDC,savedHistory.chats[item.itemID].title,rect,bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);}return TRUE;}
+        DrawButton(item);return TRUE;
+    }
     case WM_PAINT: {
         PAINTSTRUCT paint;HDC dc=BeginPaint(window,&paint);RECT rect;GetClientRect(window,&rect);
         if(rect.right>0&&rect.bottom>0){HDC buffer=CreateCompatibleDC(dc);HBITMAP bitmap=CreateCompatibleBitmap(dc,rect.right,rect.bottom);auto old=SelectObject(buffer,bitmap);Paint(buffer);BitBlt(dc,0,0,rect.right,rect.bottom,buffer,0,0,SRCCOPY);SelectObject(buffer,old);DeleteObject(bitmap);DeleteDC(buffer);}EndPaint(window,&paint);return 0;
     }
     case WM_ERASEBKGND:return 1;
     case WM_DESTROY:
+        KillTimer(window,9);if(busy)StopAgent();else PersistChat();
         if(worker){worker->Stop();worker.reset();}
         {MSG pending;while(PeekMessageW(&pending,window,WM_APP+1,WM_APP+1,PM_REMOVE))delete reinterpret_cast<chat::Result*>(pending.lParam);}
         for(auto font:{bodyFont,labelFont,headingFont,smallFont,codeFont,navIconFont,captionIconFont})if(font)DeleteObject(font);

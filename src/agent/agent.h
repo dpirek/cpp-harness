@@ -8,5 +8,5 @@ struct AgentResult { Reply reply; std::vector<Message> history; };
 using OnAgentUpdate = std::function<void(AgentUpdate)>;
 AgentResult RunAgent(const Config& config, std::vector<Message> history,
     const std::filesystem::path& directory, const Cancellation& cancel,
-    const Endpoint& endpoint = {}, const OnAgentUpdate& onUpdate = {});
+    const Endpoint& endpoint = {}, const OnAgentUpdate& onUpdate = {}, const std::filesystem::path& workspace = {});
 }

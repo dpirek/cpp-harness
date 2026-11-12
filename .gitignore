@@ -9,3 +9,7 @@ provider-settings.json
 provider-settings.json.tmp
 mcp-servers.json
 mcp-servers.json.tmp
+
+chat-history.json
+chat-history.json.tmp
+.workspace/

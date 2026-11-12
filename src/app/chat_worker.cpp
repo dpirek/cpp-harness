@@ -5,12 +5,12 @@ namespace chat {
 ChatWorker::ChatWorker(std::filesystem::path directory, Delivery delivery, Endpoint endpoint)
     : directory_(std::move(directory)), delivery_(std::move(delivery)), endpoint_(std::move(endpoint)), thread_(&ChatWorker::Loop, this) {}
 ChatWorker::~ChatWorker() { Stop(); }
-void ChatWorker::Start(std::vector<Message> messages, unsigned generation) {
+void ChatWorker::Start(std::vector<Message> messages, unsigned generation,std::filesystem::path workspace) {
     auto cancel = std::make_shared<Cancellation>();
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) return;
     if (active_) active_->Cancel();
-    pending_ = Job{std::move(messages), generation, std::move(cancel)};
+    pending_ = Job{std::move(messages), generation, std::move(cancel),std::move(workspace)};
     wake_.notify_one();
 }
 void ChatWorker::Cancel() {
@@ -44,9 +44,10 @@ void ChatWorker::Loop() {
         std::vector<Message> history;
         try {
             auto config = LoadConfig(directory_);
+            if(!job.workspace.empty())config.systemPrompt+="\nCurrent chat workspace: "+Utf8(job.workspace.wstring())+". Use this folder for files created for this conversation. PowerShell and local MCP servers start in this folder.";
             auto result = RunAgent(config, job.messages, directory_, *job.cancel, endpoint_, [&](AgentUpdate update) {
                 if (!job.cancel->IsCancelled()) delivery_(Result{job.generation, Reply{std::move(update.text), true}, false, update.kind});
-            });
+            },job.workspace);
             reply = std::move(result.reply);history = std::move(result.history);
         } catch (const std::runtime_error& error) {
             reply.text = Wide(error.what());

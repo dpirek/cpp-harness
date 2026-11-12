@@ -1,3 +1,4 @@
+#include "config/chat_history.h"
 #include "client/chat_client.h"
 #include "app/chat_worker.h"
 #include "client/stream_decoder.h"
@@ -20,7 +21,10 @@
 
 using namespace chat;
 using namespace std::chrono_literals;
-void Check(bool value, const char* name) { if (!value) throw std::runtime_error(name); }
+void Check(bool value, const char* name) {
+    if (!value) throw std::runtime_error(name);
+    std::cout << "PASS: " << name << std::endl;
+}
 struct SavedEnv {
     std::wstring name, value; bool existed;
     explicit SavedEnv(const wchar_t* n) : name(n) {
@@ -71,6 +75,27 @@ int main(int argc,char** argv) {
         Check(argc==2,"Pass the local mock server port.");
         SavedEnv key(L"OPEN_ROUTER_KEY"),alias(L"OPENROUTER_API_KEY"),model(L"OPENROUTER_MODEL");
         SavedEnv genericKey(L"AI_API_KEY"),genericModel(L"AI_MODEL"),genericUrl(L"AI_BASE_URL"),legacyUrl(L"AI_PROVIDER_URL");
+        {
+            auto store=std::filesystem::current_path()/L"build"/(L"history-test-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
+            std::filesystem::create_directories(store);Check(LoadChatHistory(store).chats.empty(),"Missing history starts empty");
+            ChatHistory history;auto first=NewSavedChat(store,history);history.activeId=first.id;history.chats.push_back(first);auto second=NewSavedChat(store,history);
+            Check(ValidChatId(first.id)&&ValidChatId(second.id)&&first.id!=second.id,"New chats receive distinct five-character alphanumeric IDs");
+            Check(std::filesystem::is_directory(ChatWorkspace(store,first.id))&&std::filesystem::is_directory(ChatWorkspace(store,second.id)),"Each chat gets its own workspace folder");
+            bool traversal=false;try{ChatWorkspace(store,"../xx");}catch(...){traversal=true;}Check(traversal,"Workspace rejects path traversal IDs");
+            Message visible{L"streaming",L"Partial response"};visible.activity=L"Stopped";
+            Message request{L"user",L"Unicode \u65e5\nnext"};request.attachments.push_back({L"notes.txt","text/plain","document contents",17});
+            Message call{L"assistant",L""};call.toolCalls.push_back({"call-one","computer",R"({"action":"screenshot"})"});
+            Message result{L"tool",L"{}"};result.toolCallId="call-one";
+            history.chats[0].title=L"Saved chat";history.chats[0].draft=L"Unsent draft";history.chats[0].messages={request,visible};history.chats[0].context={request,call,result};history.chats.push_back(second);
+            SaveChatHistory(store,history);auto loaded=LoadChatHistory(store);
+            Check(loaded.activeId==first.id&&loaded.chats.size()==2&&loaded.chats[0].draft==L"Unsent draft"&&loaded.chats[0].messages[1].role==L"partial","History preserves active chat drafts and interrupted messages");
+            Check(loaded.chats[0].context[0].text==request.text&&loaded.chats[0].context[0].attachments[0].data=="document contents"&&loaded.chats[0].context[1].toolCalls[0].name=="computer"&&loaded.chats[0].context[2].toolCallId=="call-one","History preserves Unicode attachments tool calls and matching results");
+            Check(!std::filesystem::exists(store/L"chat-history.json.tmp"),"History is atomically replaced");
+            {std::ofstream damaged(store/L"chat-history.json");damaged<<"{broken";}
+            bool rejected=false;try{LoadChatHistory(store);}catch(...){rejected=true;}Check(rejected,"Damaged history is reported");
+            {std::ifstream damaged(store/L"chat-history.json");std::string bytes((std::istreambuf_iterator<char>(damaged)),{});Check(bytes=="{broken","Loading damaged history does not overwrite it");}
+            std::filesystem::remove_all(store);
+        }
         auto directory=std::filesystem::current_path()/L"build"/L"test-config";
         std::filesystem::create_directories(directory);
         std::filesystem::remove(directory/L"provider-settings.json");
@@ -374,6 +399,10 @@ int main(int argc,char** argv) {
         limited=config;limited.maxToolCalls=1;endpoint.path=L"/agent";agent=RunAgent(limited,{{L"user",L"Run tools"}},directory,cancel,endpoint);
         Check(agent.reply.metrics.calls==1&&nlohmann::json::parse(Utf8(agent.history.back().text)).contains("error"),"Configured tool call limit stops additional commands");
         std::filesystem::remove(directory/L"agent-output.txt");
+        ChatHistory workspaceHistory;auto workspaceChat=NewSavedChat(directory,workspaceHistory);auto workspace=ChatWorkspace(directory,workspaceChat.id);
+        endpoint.path=L"/agent";auto workspaceAgent=RunAgent(config,{{L"user",L"Run tools in this workspace"}},directory,cancel,endpoint,{},workspace);
+        Check(workspaceAgent.reply.ok&&std::filesystem::exists(workspace/L"agent-output.txt")&&!std::filesystem::exists(directory/L"agent-output.txt"),"Agent runs file tools in chat workspace while reading config from settings directory");
+        std::filesystem::remove(workspace/L"agent-output.txt");std::filesystem::remove(workspace);std::filesystem::remove(directory/L".workspace");
         std::filesystem::remove(envFile);std::filesystem::remove(directory);
         std::cout<<"All configuration, streaming, PowerShell, agent-loop, cancellation, and worker tests passed.\n";
         return 0;

@@ -20,7 +20,7 @@ public:
     using Delivery = std::function<void(Result)>;
     ChatWorker(std::filesystem::path directory, Delivery delivery, Endpoint endpoint = {});
     ~ChatWorker();
-    void Start(std::vector<Message> messages, unsigned generation);
+    void Start(std::vector<Message> messages, unsigned generation, std::filesystem::path workspace = {});
     void Cancel();
     void Stop();
 private:
@@ -28,6 +28,7 @@ private:
         std::vector<Message> messages;
         unsigned generation;
         std::shared_ptr<Cancellation> cancel;
+        std::filesystem::path workspace;
     };
     void Loop();
     std::filesystem::path directory_;

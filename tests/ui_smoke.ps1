@@ -91,6 +91,7 @@ if($ModelServerPort){
  Copy-Item -LiteralPath (Join-Path $root $Executable) -Destination (Join-Path $isolated 'chat.exe') -Force
  Set-Content -LiteralPath (Join-Path $isolated '.env') -Value ''
  Remove-Item -LiteralPath (Join-Path $isolated 'provider-settings.json') -ErrorAction SilentlyContinue
+ Remove-Item -LiteralPath (Join-Path $isolated 'chat-history.json') -ErrorAction SilentlyContinue
  $Executable='build\ui-settings-test\chat.exe'
 }
 $process=Start-Process -FilePath (Join-Path $root $Executable) -WindowStyle Hidden -PassThru
@@ -358,13 +359,48 @@ try {
   }
   SaveWindowPreview $window 'send-stop-preview.png'
  }
+ if($ModelServerPort){
+  $historyPath=Join-Path $isolated 'chat-history.json'
+  if(!(Test-Path -LiteralPath $historyPath)){throw 'Chat history JSON was not created.'}
+  $before=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  $previousId=$before.active_chat_id
+  $null=[UiCheck]::SendMessage([UiCheck]::GetDlgItem($window,1),0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
+  $after=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  if($after.active_chat_id -eq $previousId -or $after.active_chat_id -notmatch '^[A-Za-z0-9]{5}$'){throw 'New chat needs a distinct five-character ID.'}
+  if(!(Test-Path -LiteralPath (Join-Path $isolated ('.workspace/'+$after.active_chat_id)))){throw 'Chat workspace folder missing.'}
+  $list=[UiCheck]::GetDlgItem($window,7)
+  $null=[UiCheck]::SendMessage($list,0x186,[IntPtr]1,[IntPtr]::Zero)
+  $null=[UiCheck]::SendMessage($window,0x111,[IntPtr]0x10007,$list)
+  $selectedHistory=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  if($selectedHistory.active_chat_id -ne $previousId){throw 'Selecting history must restore the old chat.'}
+  $restoredDraft=New-Object System.Text.StringBuilder 512
+  $null=[UiCheck]::GetText($inputWindow,13,[IntPtr]512,$restoredDraft)
+  if($restoredDraft.ToString() -ne 'Keep this draft'){throw 'Chat selection must restore its draft.'}
+  $wide=[int][Math]::Round(900*[UiCheck]::GetDpiForWindow($window)/96)
+  $null=[UiCheck]::SetWindowPos($window,[IntPtr]::Zero,60,60,$wide,1200,0x14)
+  if(![UiCheck]::IsWindowVisible($list)){throw 'Expanded sidebar must show chat history.'}
+  SaveWindowPreview $window 'chat-history-preview.png'
+ }
  $minimize=[UiCheck]::GetDlgItem($window,10)
  $null=[UiCheck]::SendMessage($minimize,0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
  if(![UiCheck]::IsIconic($window)){throw 'Minimize button failed.'}
  $null=[UiCheck]::ShowWindow($window,9)
  $null=[UiCheck]::SendMessage($maximize,0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
  if(![UiCheck]::IsZoomed($window)){throw 'Maximize button failed.'}
- Write-Output 'UI passed: square modal corners, custom draggable headers and close controls, settings, prompt layout, and main window controls.'
+ if($ModelServerPort){
+  $null=[UiCheck]::SendMessage([UiCheck]::GetDlgItem($window,12),0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
+  if(!$process.WaitForExit(5000)){throw 'Chat app did not close for history restore test.'}
+  $process=Start-Process -FilePath (Join-Path $root $Executable) -WindowStyle Hidden -PassThru
+  $null=$process.WaitForInputIdle(5000)
+  $window=[UiCheck]::Find($process.Id)
+  if($window -eq [IntPtr]::Zero){throw 'Chat app did not reopen.'}
+  $restoredDraft=New-Object System.Text.StringBuilder 512
+  $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($window,3),13,[IntPtr]512,$restoredDraft)
+  if($restoredDraft.ToString() -ne 'Keep this draft'){throw 'Restart must restore the active chat draft.'}
+  $restoredHistory=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  if($restoredHistory.active_chat_id -ne $previousId){throw 'Restart must restore the active chat.'}
+ }
+ Write-Output 'UI passed: settings, chat history restoration, per-chat workspaces, prompt layout, and window controls.'
 } finally {
  if(!$KeepOpen -and $window -ne [IntPtr]::Zero){
   $close=[UiCheck]::GetDlgItem($window,12)
