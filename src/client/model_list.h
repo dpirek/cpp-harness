@@ -43,24 +43,4 @@ inline std::string ModelHttpError(unsigned status) {
     else message+="Check the provider URL and access, or enter a model ID manually.";
     return message;
 }
-inline std::string ModelErrorDetail(const std::string& body,const std::string& key) {
-    // Only show structured error messages, never raw HTML or request bodies.
-    auto json=nlohmann::json::parse(body,nullptr,false);
-    if(!json.is_object())return {};
-    const nlohmann::json* value=nullptr;
-    if(json.contains("error")) {
-        auto& error=json["error"];
-        if(error.is_string())value=&error;
-        else if(error.is_object()&&error.contains("message"))value=&error["message"];
-    }
-    if(!value&&json.contains("detail")) {
-        auto& detail=json["detail"];
-        if(detail.is_string())value=&detail;
-        else if(detail.is_array()&&!detail.empty()&&detail[0].is_object()&&detail[0].contains("msg"))value=&detail[0]["msg"];
-    }
-    if(!value||!value->is_string())return {};
-    auto message=value->get<std::string>();
-    if(!key.empty())for(size_t pos=0;(pos=message.find(key,pos))!=message.npos;pos+=10)message.replace(pos,key.size(),"[redacted]");
-    try{auto wide=Wide(message);if(wide.size()>240)wide=wide.substr(0,239)+L"\u2026";for(auto& c:wide)if(c<32||c==127)c=L' ';return Utf8(wide);}catch(...){return {};}
-}
 }

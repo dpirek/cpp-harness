@@ -652,6 +652,23 @@ INT_PTR CALLBACK SystemPromptSettingsProc(HWND window,UINT message,WPARAM wParam
     return FALSE;
 }
 void DrawButton(const DRAWITEMSTRUCT& item);
+LRESULT CALLBACK SettingsBorderProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR combo) {
+    auto result=DefSubclassProc(window,message,wParam,lParam);
+    if(!combo&&message==WM_NCCALCSIZE) {
+        // RECT is the first member of NCCALCSIZE_PARAMS for wParam == TRUE.
+        InflateRect(reinterpret_cast<RECT*>(lParam),-1,-1);
+        return 0;
+    }
+    if(message==WM_NCPAINT||message==WM_PAINT) {
+        auto dc=GetWindowDC(window);
+        if(dc) {
+            RECT rect{};GetWindowRect(window,&rect);OffsetRect(&rect,-rect.left,-rect.top);
+            auto brush=CreateSolidBrush(Border);FrameRect(dc,&rect,brush);DeleteObject(brush);ReleaseDC(window,dc);
+        }
+    }
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsBorderProc,2);
+    return result;
+}
 LRESULT CALLBACK SettingsEditProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
     if(message==WM_KEYDOWN&&(GetKeyState(VK_CONTROL)&0x8000)&&!(GetKeyState(VK_MENU)&0x8000)) {
         UINT action=wParam=='A'?EM_SETSEL:wParam=='C'?WM_COPY:wParam=='X'?WM_CUT:wParam=='V'?WM_PASTE:wParam=='Z'?WM_UNDO:0;
@@ -708,11 +725,13 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                 }
                 if(lstrcmpiW(type,L"EDIT")==0) {
                     SetWindowSubclass(control,SettingsEditProc,1,0);
+                    SetWindowSubclass(control,SettingsBorderProc,2,0);
                     SetWindowLongPtrW(control,GWL_EXSTYLE,GetWindowLongPtrW(control,GWL_EXSTYLE)&~WS_EX_CLIENTEDGE);
-                    SetWindowLongPtrW(control,GWL_STYLE,GetWindowLongPtrW(control,GWL_STYLE)|WS_BORDER|ES_NOHIDESEL);
+                    SetWindowLongPtrW(control,GWL_STYLE,(GetWindowLongPtrW(control,GWL_STYLE)&~WS_BORDER)|ES_NOHIDESEL);
                     SetWindowPos(control,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);
                 }
                 if(lstrcmpiW(type,L"COMBOBOX")==0) {
+                    SetWindowSubclass(control,SettingsBorderProc,2,1);
                     COMBOBOXINFO info{sizeof(info)};
                     if(GetComboBoxInfo(control,&info)&&info.hwndItem)SetWindowSubclass(info.hwndItem,SettingsEditProc,1,0);
                 }
@@ -777,7 +796,8 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
 }
 void OpenSettings() {
     struct DialogTemplate {DLGTEMPLATE dialog;WORD menu,windowClass,title;} dialog{};
-    dialog.dialog.style=WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER;
+    // InitModalChrome centers the final sized dialog over its owner.
+    dialog.dialog.style=WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME;
     dialog.dialog.cx=326;dialog.dialog.cy=238;
     if(DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,app,SettingsTabsProc,0)==-1)
         ShowModalMessage(app,L"Could not open the settings window.",L"Settings",MB_OK|MB_ICONERROR);

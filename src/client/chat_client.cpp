@@ -1,4 +1,5 @@
 #include "client/model_list.h"
+#include "client/provider_error.h"
 #include "tools/computer_tool.h"
 #include "client/chat_client.h"
 #include "common/text_encoding.h"
@@ -144,11 +145,10 @@ std::string BuildPayload(const Config& config, const std::vector<Message>& messa
     return payload.dump();
 }
 Reply ParseReply(unsigned status, const std::string& body) {
-    // Never display untrusted HTTP bodies: they may contain request details.
-    if (status < 200 || status >= 300) return {L"AI request failed (HTTP " + std::to_wstring(status) + L"). Check your API key, credits, and model, then try again."};
+    if (status < 200 || status >= 300) return {L"AI request failed (HTTP " + std::to_wstring(status) + L").\r\nProvider response:\r\n"+Wide(ProviderResponseText(body))};
     try {
         auto json = Json::parse(body);
-        if (json.contains("error")) return {L"The AI provider reported an error. Check your model and credits, then try again."};
+        if (json.contains("error")) return {L"The AI provider reported an error.\r\nProvider response:\r\n"+Wide(ProviderResponseText(body))};
         auto& message=json.at("choices").at(0).at("message");
         Reply reply;reply.ok=true;
         if(message.contains("content")&&!message["content"].is_null())reply.text=Wide(message.at("content").get<std::string>());
@@ -303,8 +303,8 @@ std::vector<std::string> FetchModels(const Config& config,const Cancellation& ca
 
         std::string body;
         for(;;){request.Begin(cancel);request.Wait(WinHttpReadData(request.handle,request.buffer.data(),static_cast<DWORD>(request.buffer.size()),nullptr),cancel,deadline);if(!request.bytes)break;body.append(request.buffer.data(),request.bytes);if(body.size()>4*1024*1024)throw std::runtime_error("The model list is too large.");}
-        if(status<200||status>=300){auto detail=ModelErrorDetail(body,config.key);throw std::runtime_error(ModelHttpError(status)+(detail.empty()?"":" Provider: "+detail));}
-        return ParseModelList(body);
+        if(status<200||status>=300)throw std::runtime_error(ModelHttpError(status)+"\r\nRequest: GET "+Utf8(endpoint.path.substr(0,endpoint.path.find(L'?')))+"\r\nProvider response:\r\n"+ProviderResponseText(body,config.key));
+        try{return ParseModelList(body);}catch(const std::runtime_error& error){throw std::runtime_error(std::string(error.what())+"\r\nProvider response:\r\n"+ProviderResponseText(body,config.key));}
     }catch(const Cancelled&){throw std::runtime_error("Model loading cancelled.");}
 }
 Reply Complete(const Config& config, const std::vector<Message>& messages, const Cancellation& cancel, const Endpoint& overrideEndpoint, const OnDelta& onDelta) {
@@ -347,6 +347,13 @@ Reply Complete(const Config& config, const std::vector<Message>& messages, const
         if (!WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) AsyncRequest::Fail(GetLastError());
         if (status < 200 || status >= 300) {
+            std::string errorBody;
+            for(;;) {
+                request.Begin(cancel);request.Wait(WinHttpReadData(request.handle,request.buffer.data(),static_cast<DWORD>(request.buffer.size()),nullptr),cancel,deadline);
+                if(!request.bytes)break;
+                errorBody.append(request.buffer.data(),request.bytes);
+                if(errorBody.size()>65536)break;
+            }
             auto failure=ParseReply(status, {});
             if(status==400||status==404||status==413||status==422) {
                 bool image=false,pdf=false;
@@ -364,12 +371,15 @@ Reply Complete(const Config& config, const std::vector<Message>& messages, const
                     }
                 }
             }
+            auto response=failure.text.find(L"\r\nProvider response:");
+            if(response!=failure.text.npos)failure.text.resize(response);
+            failure.text+=L"\r\nProvider response:\r\n"+Wide(ProviderResponseText(errorBody,config.key));
             return failure;
         }
         // Some compatible providers return a JSON completion despite stream=true.
         bool formatKnown=false,jsonResponse=false;
         std::string responseBody;
-        StreamDecoder decoder(onDelta);
+        StreamDecoder decoder(onDelta,config.key);
         size_t received = 0;
         for (;;) {
             request.Begin(cancel);
@@ -399,7 +409,8 @@ Reply Complete(const Config& config, const std::vector<Message>& messages, const
             if (!jsonResponse&&decoder.Done()) break;
         }
         if(jsonResponse) {
-            auto reply=ParseReply(status,responseBody);
+            auto response=Json::parse(responseBody,nullptr,false);
+            auto reply=ParseReply(status,response.is_object()&&response.contains("error")?ProviderResponseText(responseBody,config.key):responseBody);
             if(reply.ok&&onDelta&&!reply.text.empty())onDelta(reply.text);
             return reply;
         }

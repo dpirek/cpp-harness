@@ -12,6 +12,7 @@ const server = http.createServer((req, res) => {
       if(req.url==='/keyless/models') {res.writeHead(req.headers.authorization===undefined?200:400);res.end('{"data":[{"id":"local-model"}]}');return;}
       if(req.headers.authorization!=='Bearer test-key'){res.writeHead(401).end();return;}
       if(req.url==='/v1/models'||req.url==='/v1/models?version=required'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'z/model'},{id:'a/model'},{id:'z/model'},{id:''},{name:'invalid'}]}));return;}
+      if(req.url==='/validation/models'){res.writeHead(422,{'Content-Type':'application/json'});res.end(JSON.stringify({detail:[{loc:['query','version'],msg:'Missing version',input:'test-key'}]}));return;}
       if(req.url==='/invalid/models'){res.end('{broken');return;}
       if(req.url==='/empty/models'){res.end('{"data":[]}');return;}
       if(req.url==='/slow/models'){setTimeout(()=>res.end('{"data":[{"id":"slow"}]}'),1500);return;}
@@ -146,6 +147,7 @@ const server = http.createServer((req, res) => {
         break;
       }
       case '/loop': res.end(toolStream([{id:'loop_'+payload.messages.length,name:'unknown',arguments:'{}'}])); break;
+      case '/validation/chat/completions': res.writeHead(422,{'Content-Type':'application/json'}).end(JSON.stringify({detail:[{loc:['body','model'],msg:'Invalid model',input:'test-key'}]}));break;
       case '/unauthorized': res.writeHead(401).end('private error details'); break;
       case '/attachment-rejected': res.writeHead(400).end('private details'); break;
       case '/attachment-too-large': res.writeHead(413).end('private details'); break;

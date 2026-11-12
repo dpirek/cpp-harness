@@ -1,3 +1,4 @@
+#include "client/provider_error.h"
 #include "client/stream_decoder.h"
 #include "common/text_encoding.h"
 #include <nlohmann/json.hpp>
@@ -33,7 +34,7 @@ void StreamDecoder::Event() {
     if (data == "[DONE]") { done_ = true; return; }
     auto json = nlohmann::json::parse(data, nullptr, false);
     if (json.is_discarded() || !json.is_object()) throw std::runtime_error("The AI service returned an invalid stream. Please try again.");
-    if (json.contains("error")) throw std::runtime_error("The AI stream failed. Check your model and credits, then try again.");
+    if (json.contains("error")) throw std::runtime_error("The AI stream failed.\r\nProvider response:\r\n"+ProviderResponseText(data,key_));
     if(json.contains("usage")&&json["usage"].is_object()) {
         auto count=[&](const char* name,uint64_t& total,unsigned& reports) {
             auto entry=json["usage"].find(name);if(entry==json["usage"].end()||!entry->is_number_integer())return;

@@ -1,3 +1,4 @@
+#include "client/provider_error.h"
 #include "client/model_list.h"
 #include "config/chat_history.h"
 #include "client/chat_client.h"
@@ -219,7 +220,7 @@ int main(int argc,char** argv) {
         Check(!ParseReply(200,R"({"choices":[]})").ok,"Missing choice rejected");
         Check(!ParseReply(200,R"({"choices":[{"message":{"content":null}}]})").ok,"Null content rejected");
         Check(!ParseReply(200,R"({"choices":[{"message":{"content":"  "}}]})").ok,"Blank content rejected");
-        Check(ParseReply(401,"secret server details").text.find(L"secret")==std::wstring::npos,"Error body never exposed");
+        Check(ParseReply(422,"validation details").text.find(L"validation details")!=std::wstring::npos,"HTTP errors display provider response text");
         Endpoint endpoint;endpoint.host=L"127.0.0.1";endpoint.port=static_cast<unsigned short>(std::stoi(argv[1]));endpoint.secure=false;endpoint.timeoutMs=3000;
         {
             using Json=nlohmann::json;
@@ -272,7 +273,11 @@ int main(int argc,char** argv) {
                 bool failed=false;try{ParseModelList(body);}catch(const std::exception&){failed=true;}Check(failed,"Invalid model responses report useful errors");
             }
             Check(ModelHttpError(422).find("query parameters")!=std::string::npos,"HTTP 422 explains validation and endpoint requirements");
-            Check(ModelErrorDetail(R"({"detail":[{"msg":"Invalid test-key parameter","input":"secret"}]})","test-key")=="Invalid [redacted] parameter","Structured validation errors redact keys and omit request inputs");
+            Check(ProviderResponseText("echo test-key","test-key")=="echo [redacted]","Raw error responses redact API keys");
+            Check(ProviderResponseText("")=="(empty response body)","Empty error body is explicit");
+            Check(ProviderResponseText(std::string(20000,'x')).find("truncated")!=std::string::npos,"Large error response is bounded");
+            auto rejectedModels=provider;rejectedModels.url="http://127.0.0.1:"+std::string(argv[1])+"/validation/chat/completions";
+            bool detailed=false;try{FetchModels(rejectedModels,modelCancel);}catch(const std::exception& error){std::string text=error.what();detailed=text.find("422")!=text.npos&&text.find("loc")!=text.npos&&text.find("[redacted]")!=text.npos&&text.find("test-key")==text.npos;}Check(detailed,"Model HTTP 422 preserves validation response and redacts key");
             auto queryProvider=provider;queryProvider.url+="?version=required";
             Check(FetchModels(queryProvider,modelCancel)==models,"Model discovery preserves query parameters");
             auto local=provider;local.key.clear();local.url="http://127.0.0.1:"+std::string(argv[1])+"/keyless/";
@@ -301,10 +306,13 @@ int main(int argc,char** argv) {
             endpoint.path=path;std::wstring partial;
             reply=Complete(config,history,cancel,endpoint,[&](const std::wstring& delta){partial+=delta;});
             Check(!reply.ok&&partial==L"Partial text","Partial output preserved on stream failure");
-            Check(reply.text.find(L"private details")==std::wstring::npos,"Stream errors never expose provider bodies");
+            Check(reply.text.find(L"private details")!=std::wstring::npos||std::wstring(path)==L"/interrupted","Stream errors display provider response text");
         }
         endpoint.path=L"/chunked";
         Check(Complete(config,history,cancel,endpoint).ok,"Chunked response reads");
+        endpoint.path=L"/validation/chat/completions";
+        auto validationReply=Complete(config,history,cancel,endpoint);
+        Check(!validationReply.ok&&validationReply.text.find(L"422")!=std::wstring::npos&&validationReply.text.find(L"loc")!=std::wstring::npos&&validationReply.text.find(L"test-key")==std::wstring::npos,"Chat HTTP 422 displays complete validation response and redacts credentials");
         endpoint.path=L"/unauthorized";
         Check(Complete(config,history,cancel,endpoint).text.find(L"401")!=std::wstring::npos,"HTTP status error");
         {
@@ -312,7 +320,7 @@ int main(int argc,char** argv) {
             endpoint.path=L"/attachment-rejected";
             auto imageFailure=Complete(config,{image},cancel,endpoint);
             Check(!imageFailure.ok&&imageFailure.text.find(L"accepts images")!=std::wstring::npos&&imageFailure.text.find(Wide(config.model))!=std::wstring::npos,"Rejected image requests explain model compatibility");
-            Check(imageFailure.text.find(L"private details")==std::wstring::npos,"Attachment errors never expose provider bodies");
+            Check(imageFailure.text.find(L"private details")!=std::wstring::npos,"Attachment errors include provider response text");
             endpoint.path=L"/attachment-too-large";
             Check(Complete(config,{image},cancel,endpoint).text.find(L"Reduce attachment sizes")!=std::wstring::npos,"Oversized attachment requests explain size recovery");
         }
