@@ -4,6 +4,8 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <commctrl.h>
+#include <uxtheme.h>
+#pragma comment(lib,"uxtheme.lib")
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -444,15 +446,20 @@ INT_PTR CALLBACK McpSettingsProc(HWND window,UINT message,WPARAM wParam,LPARAM) 
     return FALSE;
 }
 struct ModelResult {std::vector<std::string> models;std::wstring error;};
+void ShowProviderError(HWND owner,const std::wstring& error);
 struct SettingsState {
     std::future<ModelResult> request;
     std::shared_ptr<chat::Cancellation> cancel;
     unsigned revision=0,issued=0;
     ULONGLONG due=0;
     bool pending=false;
+    bool applyingPreset=false;
+    std::wstring error;
     ~SettingsState(){if(cancel)cancel->Cancel();}
 };
 void QueueModels(HWND window,SettingsState& state) {
+    if(state.applyingPreset)return;
+    state.error.clear();EnableWindow(GetDlgItem(window,116),FALSE);
     ++state.revision;if(state.cancel)state.cancel->Cancel();
     state.pending=true;state.due=GetTickCount64()+600;
     auto selected=ControlText(window,103);
@@ -468,7 +475,8 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
             HWND child=CreateWindowExW((style&WS_BORDER)?WS_EX_CLIENTEDGE:0,type,text,WS_CHILD|WS_VISIBLE|style,scale(x),scale(y),scale(width),scale(height),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
             SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);return child;
         };
-        control(L"STATIC",L"Chat completions URL",0,0,24,20,592,24);
+        control(L"STATIC",L"Chat completions URL",0,0,24,20,400,24);
+        control(L"BUTTON",L"Provider type...",WS_TABSTOP,115,440,14,176,28);
         control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL,101,24,48,592,30);
         control(L"STATIC",L"API key (optional for local endpoints)",0,0,24,92,592,24);
         auto key=control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD,102,24,120,400,30);
@@ -485,7 +493,8 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         auto tokenField=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,113,440,264,176,180);
         for(auto name:{L"max_tokens",L"max_completion_tokens",L"none"})SendMessageW(tokenField,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
         control(L"BUTTON",L"Request token usage in stream (disable if unsupported)",WS_TABSTOP|BS_AUTOCHECKBOX,114,24,422,592,20);
-        control(L"EDIT",L"Enter a provider URL to load available models.",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,104,24,306,592,52);
+        control(L"EDIT",L"Enter a provider URL to load available models.",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,104,24,306,456,52);
+        auto details=control(L"BUTTON",L"Error details",WS_TABSTOP,116,496,306,120,30);EnableWindow(details,FALSE);
         control(L"STATIC",L"Max model turns (1-100)",0,0,24,360,280,24);
         control(L"EDIT",L"8",WS_TABSTOP|WS_BORDER|ES_NUMBER,108,24,388,280,30);
         control(L"STATIC",L"Max tool calls (1-1000)",0,0,336,360,280,24);
@@ -514,6 +523,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
                 auto index=SendDlgItemMessageW(window,103,CB_FINDSTRINGEXACT,static_cast<WPARAM>(-1),reinterpret_cast<LPARAM>(selected.c_str()));
                 if(index!=CB_ERR)SendDlgItemMessageW(window,103,CB_SETCURSEL,index,0);else SetDlgItemTextW(window,103,selected.c_str());
                 SetDlgItemTextW(window,104,result.error.empty()?L"Select an available model. Click Save to keep your selection.":result.error.c_str());
+                state->error=result.error;EnableWindow(GetDlgItem(window,116),!state->error.empty());
             }
         }
         if(state->pending&&GetTickCount64()>=state->due) {
@@ -530,6 +540,34 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         return TRUE;
     }
     if(message==WM_COMMAND) {
+        if(state&&LOWORD(wParam)==116&&HIWORD(wParam)==BN_CLICKED){ShowProviderError(window,state->error);return TRUE;}
+        if(state&&LOWORD(wParam)==115&&HIWORD(wParam)==BN_CLICKED) {
+            struct Preset {const wchar_t* name;const wchar_t* url;const wchar_t* example;const wchar_t* auth;const wchar_t* model;const wchar_t* hint;bool usage;};
+            const Preset presets[]{
+                {L"OpenRouter",L"https://openrouter.ai/api/v1/chat/completions",L"",L"Authorization",L"openrouter/auto",L"Enter your OpenRouter key to load models.",true},
+                {L"OpenAI",L"https://api.openai.com/v1/chat/completions",L"",L"Authorization",L"",L"Enter your OpenAI key, then choose a model.",true},
+                {L"Azure deployment",L"",L"https://RESOURCE.openai.azure.com/openai/deployments/DEPLOYMENT/chat/completions?api-version=VERSION",L"api-key",L"",L"Enter your full deployment URL, API version and deployment name. Use Authorization for an Entra token.",false},
+                {L"Azure / Foundry v1",L"",L"https://RESOURCE.openai.azure.com/openai/v1",L"api-key",L"",L"Enter your Azure or Foundry v1 URL and deployment name. Use Authorization for an Entra token.",true},
+                {L"Internal gateway",L"",L"https://YOUR-GATEWAY/v1",L"Authorization",L"",L"Enter your gateway URL and authentication header. Set Models URL if your catalog uses a separate endpoint.",false},
+                {L"Local / compatible",L"http://localhost:8000/v1",L"",L"none",L"",L"Enter your local server URL and model ID. Choose an authentication header if the server requires a key.",false}
+            };
+            auto menu=CreatePopupMenu();for(unsigned i=0;i<6;++i)AppendMenuW(menu,MF_STRING,i+1,presets[i].name);
+            RECT button{};GetWindowRect(GetDlgItem(window,115),&button);
+            auto choice=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_TOPALIGN,button.left,button.bottom,0,window,nullptr);DestroyMenu(menu);
+            if(choice>=1&&choice<=6) {
+                const auto& preset=presets[choice-1];state->applyingPreset=true;
+                ++state->revision;if(state->cancel)state->cancel->Cancel();state->pending=false;state->error.clear();
+                // A credential for the old endpoint must not be sent to a newly selected service.
+                SetDlgItemTextW(window,102,L"");SetDlgItemTextW(window,101,preset.url);SetDlgItemTextW(window,112,L"");
+                SendDlgItemMessageW(window,101,EM_SETCUEBANNER,FALSE,reinterpret_cast<LPARAM>(preset.example));
+                SetDlgItemTextW(window,111,preset.auth);SendDlgItemMessageW(window,103,CB_RESETCONTENT,0,0);SetDlgItemTextW(window,103,preset.model);
+                SendDlgItemMessageW(window,113,CB_SETCURSEL,0,0);CheckDlgButton(window,114,preset.usage?BST_CHECKED:BST_UNCHECKED);
+                SetDlgItemTextW(window,115,preset.name);SetDlgItemTextW(window,104,preset.hint);EnableWindow(GetDlgItem(window,116),FALSE);
+                state->applyingPreset=false;SetFocus(GetDlgItem(window,*preset.url?102:101));
+            }
+            return TRUE;
+        }
+        if(state&&state->applyingPreset)return TRUE;
         if(state&&LOWORD(wParam)==111&&(HIWORD(wParam)==CBN_EDITCHANGE||HIWORD(wParam)==CBN_SELCHANGE)){QueueModels(window,*state);return TRUE;}
         if(state&&HIWORD(wParam)==EN_CHANGE&&(LOWORD(wParam)==101||LOWORD(wParam)==102||LOWORD(wParam)==112)) {
             auto selected=ControlText(window,103);QueueModels(window,*state);SetDlgItemTextW(window,103,selected.c_str());return TRUE;
@@ -664,21 +702,25 @@ INT_PTR CALLBACK SystemPromptSettingsProc(HWND window,UINT message,WPARAM wParam
     return FALSE;
 }
 void DrawButton(const DRAWITEMSTRUCT& item);
-LRESULT CALLBACK SettingsBorderProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR combo) {
+LRESULT CALLBACK SettingsComboProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
     auto result=DefSubclassProc(window,message,wParam,lParam);
-    if(!combo&&message==WM_NCCALCSIZE) {
-        // RECT is the first member of NCCALCSIZE_PARAMS for wParam == TRUE.
-        InflateRect(reinterpret_cast<RECT*>(lParam),-1,-1);
-        return 0;
-    }
-    if(message==WM_NCPAINT||message==WM_PAINT) {
+    if(message==WM_NCPAINT||message==WM_PAINT||message==WM_SETFOCUS||message==WM_KILLFOCUS||message==WM_ENABLE||message==WM_MOUSEMOVE||message==WM_MOUSELEAVE||message==WM_LBUTTONUP) {
         auto dc=GetWindowDC(window);
         if(dc) {
             RECT rect{};GetWindowRect(window,&rect);OffsetRect(&rect,-rect.left,-rect.top);
-            auto brush=CreateSolidBrush(Border);FrameRect(dc,&rect,brush);DeleteObject(brush);ReleaseDC(window,dc);
+            auto brush=CreateSolidBrush(Background);
+            // Cover the native recessed frame with the field's background.
+            for(int i=0;i<3;++i){FrameRect(dc,&rect,brush);InflateRect(&rect,-1,-1);}
+            COMBOBOXINFO info{sizeof(info)};
+            if(GetComboBoxInfo(window,&info)) {
+                FillRect(dc,&info.rcButton,brush);
+                int x=(info.rcButton.left+info.rcButton.right)/2,y=(info.rcButton.top+info.rcButton.bottom)/2;
+                Line(dc,x-4,y-2,x,y+2,Muted);Line(dc,x,y+2,x+4,y-2,Muted);
+            }
+            DeleteObject(brush);ReleaseDC(window,dc);
         }
     }
-    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsBorderProc,2);
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsComboProc,2);
     return result;
 }
 LRESULT CALLBACK SettingsEditProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
@@ -691,6 +733,13 @@ LRESULT CALLBACK SettingsEditProc(HWND window,UINT message,WPARAM wParam,LPARAM 
     return DefSubclassProc(window,message,wParam,lParam);
 }
 LRESULT CALLBACK SettingsPageProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    if(message==WM_CTLCOLOREDIT||message==WM_CTLCOLORSTATIC||message==WM_CTLCOLORLISTBOX) {
+        wchar_t type[32]{};GetClassNameW(reinterpret_cast<HWND>(lParam),type,32);
+        if(message!=WM_CTLCOLORSTATIC||lstrcmpiW(type,L"EDIT")==0||lstrcmpiW(type,L"COMBOBOX")==0) {
+            auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Background);SetDCBrushColor(dc,Background);
+            return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+        }
+    }
     if(message==WM_DRAWITEM){
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         Fill(item.hDC,item.rcItem,Surface);
@@ -738,13 +787,13 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                 }
                 if(lstrcmpiW(type,L"EDIT")==0) {
                     SetWindowSubclass(control,SettingsEditProc,1,0);
-                    SetWindowSubclass(control,SettingsBorderProc,2,0);
                     SetWindowLongPtrW(control,GWL_EXSTYLE,GetWindowLongPtrW(control,GWL_EXSTYLE)&~WS_EX_CLIENTEDGE);
                     SetWindowLongPtrW(control,GWL_STYLE,(GetWindowLongPtrW(control,GWL_STYLE)&~WS_BORDER)|ES_NOHIDESEL);
                     SetWindowPos(control,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);
                 }
                 if(lstrcmpiW(type,L"COMBOBOX")==0) {
-                    SetWindowSubclass(control,SettingsBorderProc,2,1);
+                    SetWindowTheme(control,L"",L"");
+                    SetWindowSubclass(control,SettingsComboProc,2,0);
                     COMBOBOXINFO info{sizeof(info)};
                     if(GetComboBoxInfo(control,&info)&&info.hwndItem)SetWindowSubclass(info.hwndItem,SettingsEditProc,1,0);
                 }
@@ -1246,6 +1295,27 @@ void InitModalChrome(HWND window,const wchar_t* title,int contentWidth,int conte
     SetWindowPos(window,nullptr,owner.left+(owner.right-owner.left-width)/2,owner.top+(owner.bottom-owner.top-height)/2,width,height,SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
     auto close=CreateWindowW(L"BUTTON",L"Close",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,width-scale(Header),0,scale(Header),scale(Header),window,reinterpret_cast<HMENU>(12),GetModuleHandleW(nullptr),nullptr);
     SetWindowLongPtrW(close,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
+}
+INT_PTR CALLBACK ProviderErrorProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    if(message==WM_INITDIALOG) {
+        InitModalChrome(window,L"Provider error - response details",720,460);
+        auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
+        auto text=reinterpret_cast<const std::wstring*>(lParam);
+        auto edit=CreateWindowW(L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|ES_NOHIDESEL,
+            scale(20),scale(Header+20),scale(680),scale(400),window,reinterpret_cast<HMENU>(201),GetModuleHandleW(nullptr),nullptr);
+        SendMessageW(edit,WM_SETFONT,reinterpret_cast<WPARAM>(codeFont),TRUE);SendMessageW(edit,EM_SETLIMITTEXT,131072,0);
+        SetWindowTextW(edit,text->c_str());SetWindowSubclass(edit,SettingsEditProc,1,0);SetFocus(edit);return FALSE;
+    }
+    if(message==WM_CLOSE||(message==WM_COMMAND&&(LOWORD(wParam)==IDCANCEL||LOWORD(wParam)==IDOK))){EndDialog(window,IDCANCEL);return TRUE;}
+    if(message==WM_CTLCOLORDLG)return reinterpret_cast<INT_PTR>(surfaceBrush);
+    if(message==WM_CTLCOLORSTATIC||message==WM_CTLCOLOREDIT){auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Background);SetDCBrushColor(dc,Background);return reinterpret_cast<INT_PTR>(GetStockObject(DC_BRUSH));}
+    return FALSE;
+}
+void ShowProviderError(HWND owner,const std::wstring& error) {
+    if(error.empty())return;
+    struct DialogTemplate {DLGTEMPLATE dialog;WORD menu,windowClass,title;} dialog{};
+    dialog.dialog.style=WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME;dialog.dialog.cx=480;dialog.dialog.cy=300;
+    DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,owner,ProviderErrorProc,reinterpret_cast<LPARAM>(&error));
 }
 struct ModalMessage {const wchar_t* text;const wchar_t* title;UINT type;};
 INT_PTR CALLBACK ModalMessageProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
