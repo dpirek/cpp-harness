@@ -3,6 +3,7 @@
 #include <gdiplus.h>
 #include <objidl.h>
 #include <algorithm>
+#include <cmath>
 #include <map>
 #pragma comment(lib,"gdiplus.lib")
 #pragma comment(lib,"ole32.lib")
@@ -21,7 +22,7 @@ std::string ComputerDefinition() {
     definition["type"]="function";
     auto& function=definition["function"];
     function["name"]="computer";
-    function["description"]="Control the Windows desktop. Screenshot returns a PNG and physical desktop bounds; image (0,0) maps to (left,top). Move/click/double_click/drag require x,y; drag also requires to_x,to_y. Scroll requires delta in notches (positive up). Type requires Unicode text. Key requires a chord such as [CTRL,L] or [ENTER]; supports letters, digits, F1-F24, CTRL, ALT, SHIFT, WIN, TAB, ENTER, ESC, SPACE, BACKSPACE, DELETE, LEFT, RIGHT, UP, DOWN, HOME, END, PAGEUP, PAGEDOWN. Wait accepts milliseconds (default 300). Inspect screenshots before acting and after changes.";
+    function["description"]="Control the Windows desktop. Screenshot returns a PNG and physical desktop bounds; image (0,0) maps to (left,top). Move/click/double_click/drag require x,y; drag also requires to_x,to_y. Scroll requires delta in notches (positive up). Type requires Unicode text. Key requires a chord such as [CTRL,L] or [ENTER]; supports letters, digits, F1-F24, CTRL, ALT, SHIFT, WIN, TAB, ENTER, ESC, SPACE, BACKSPACE, DELETE, LEFT, RIGHT, UP, DOWN, HOME, END, PAGEUP, PAGEDOWN. Wait accepts milliseconds (default 300). Pointer actions move smoothly from the current cursor position and pause for hover, button presses, and desktop updates. Success means input was delivered, not that the target application completed its operation. Inspect screenshots before acting and after changes.";
     function["parameters"]={{"type","object"},{"properties",properties},{"required",Json::array({"action"})},{"additionalProperties",false}};
     return definition.dump();
 }
@@ -64,7 +65,7 @@ Attachment Capture(int x,int y,int w,int h) {
     DeleteObject(bitmap);DeleteDC(memory);ReleaseDC(nullptr,screen);Gdiplus::GdiplusShutdown(token);return result;
 }
 }
-ComputerResult RunComputer(const Json& args,const Cancellation& cancel) {
+ComputerResult RunComputer(const Json& args,const Cancellation& cancel,bool smoothPointer) {
     ComputerResult result;
     auto previous=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     try {
@@ -78,19 +79,37 @@ ComputerResult RunComputer(const Json& args,const Cancellation& cancel) {
         }
         int x=GetSystemMetrics(SM_XVIRTUALSCREEN),y=GetSystemMetrics(SM_YVIRTUALSCREEN),w=GetSystemMetrics(SM_CXVIRTUALSCREEN),h=GetSystemMetrics(SM_CYVIRTUALSCREEN);
         auto point=[&](const char* a,const char* b){Require(args.contains(a)&&args.contains(b),"Coordinates are required.");int px=args.at(a).get<int>(),py=args.at(b).get<int>();Require(px>=x&&py>=y&&px<x+w&&py<y+h,"Coordinates are outside the desktop.");return POINT{px,py};};
-        auto move=[&](POINT p){
+        auto pause=[&](DWORD ms){Require(WaitForSingleObject(cancel.Event(),ms)==WAIT_TIMEOUT,"Computer action cancelled.");};
+        auto moveTo=[&](POINT p){
             INPUT input{};input.type=INPUT_MOUSE;
             input.mi.dx=static_cast<LONG>((static_cast<long long>(p.x-x)*65536+32768)/w);
             input.mi.dy=static_cast<LONG>((static_cast<long long>(p.y-y)*65536+32768)/h);
             input.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK;Send(input);
-            // SendInput queues movement. Confirm it landed before clicking or returning success.
-            POINT actual{};
-            for(int attempt=0;attempt<5;++attempt){
-                if(GetCursorPos(&actual)&&actual.x==p.x&&actual.y==p.y)return;
-                Sleep(10);
+        };
+        auto move=[&](POINT target){
+            POINT origin{};Require(GetCursorPos(&origin)!=0,"Could not read the pointer position.");
+            double dx=static_cast<double>(target.x-origin.x),dy=static_cast<double>(target.y-origin.y);
+            double distance=std::hypot(dx,dy);
+            if(distance>0&&smoothPointer) {
+                int duration=std::clamp(static_cast<int>(distance/2),180,800),steps=(duration+15)/16;
+                auto began=GetTickCount64();
+                for(int step=1;step<=steps;++step) {
+                    Require(!cancel.IsCancelled(),"Computer action cancelled.");
+                    double t=static_cast<double>(step)/steps,eased=t*t*(3-2*t);
+                    moveTo({origin.x+static_cast<LONG>(std::lround(dx*eased)),origin.y+static_cast<LONG>(std::lround(dy*eased))});
+                    auto due=began+static_cast<ULONGLONG>(duration)*step/steps,now=GetTickCount64();
+                    if(due>now)pause(static_cast<DWORD>(due-now));
+                }
             }
-            Require(SetCursorPos(p.x,p.y)!=0,"Windows blocked pointer movement. Check the input desktop and any application confining the cursor.");
-            Require(GetCursorPos(&actual)&&actual.x==p.x&&actual.y==p.y,"Pointer did not reach the requested position. Another application may be confining or moving it.");
+            if(distance>0&&!smoothPointer)moveTo(target);
+            // Confirm queued movement was processed before sending a button press.
+            POINT actual{};bool arrived=false;
+            for(int attempt=0;attempt<10;++attempt) {
+                Require(!cancel.IsCancelled(),"Computer action cancelled.");
+                if(GetCursorPos(&actual)&&actual.x==target.x&&actual.y==target.y){arrived=true;break;}
+                pause(10);
+            }
+            Require(arrived,"Pointer did not reach the requested position. Another application may be confining or moving it.");
         };
         auto action=args["action"].get<std::string>();
         if(action=="screenshot") {result.screenshot=Capture(x,y,w,h);result.output={{"left",x},{"top",y},{"width",w},{"height",h},{"coordinates","physical desktop pixels"}};}
@@ -131,8 +150,19 @@ ComputerResult RunComputer(const Json& args,const Cancellation& cancel) {
             DWORD down=button=="left"?MOUSEEVENTF_LEFTDOWN:button=="right"?MOUSEEVENTF_RIGHTDOWN:MOUSEEVENTF_MIDDLEDOWN;
             DWORD up=button=="left"?MOUSEEVENTF_LEFTUP:button=="right"?MOUSEEVENTF_RIGHTUP:MOUSEEVENTF_MIDDLEUP;
             move(start);
-            if(action!="move")for(int click=0;click<(action=="double_click"?2:1);++click){Mouse(down);try{if(action=="drag")for(int step=1;step<=20&&!cancel.IsCancelled();++step){move({start.x+(end.x-start.x)*step/20,start.y+(end.y-start.y)*step/20});WaitForSingleObject(cancel.Event(),10);}}catch(...){try{Mouse(up);}catch(...){}throw;}Mouse(up);}
+            pause(action=="move"?(smoothPointer?80:0):160); // Allow hover/activation handlers to run before pressing.
+            if(action!="move")for(int click=0;click<(action=="double_click"?2:1);++click) {
+                Require(!cancel.IsCancelled(),"Computer action cancelled.");Mouse(down);
+                try {
+                    pause(std::min<DWORD>(60,std::max<DWORD>(1,GetDoubleClickTime()/4)));
+                    if(action=="drag"){move(end);pause(100);}
+                }catch(...){try{Mouse(up);}catch(...){}throw;}
+                Mouse(up);
+                if(action=="double_click"&&click==0)pause(std::min<DWORD>(100,std::max<DWORD>(1,GetDoubleClickTime()/4)));
+            }
+            if(action!="move")pause(350); // Let the target process the release and resulting UI changes.
         } else throw std::runtime_error("Unknown computer action.");
+        if(action=="type"||action=="key"||action=="scroll")pause(action=="scroll"?250:150);
         if(result.output.is_null())result.output={{"ok",!cancel.IsCancelled()},{"action",action}};
     }catch(const std::exception& error){result.output={{"error",error.what()}};}
     if(previous)SetThreadDpiAwarenessContext(previous);

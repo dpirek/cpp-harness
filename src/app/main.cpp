@@ -569,12 +569,12 @@ INT_PTR CALLBACK ComputerSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         double angle=state->step*6.283185307179586/120;
         POINT target{state->center.x+static_cast<LONG>(std::lround(state->radius*std::cos(angle))),state->center.y+static_cast<LONG>(std::lround(state->radius*std::sin(angle)))};
         chat::Cancellation cancel;
-        auto result=active?chat::RunComputer({{"action","move"},{"x",target.x},{"y",target.y}},cancel):chat::ComputerResult{};
+        auto result=active?chat::RunComputer({{"action","move"},{"x",target.x},{"y",target.y}},cancel,false):chat::ComputerResult{};
         bool failed=result.output.contains("error");
         if(!active||failed||++state->step>120) {
             KillTimer(window,5);
             auto status=!active?std::wstring(L"Mouse circle stopped because Settings lost focus."):failed?L"Mouse movement failed: "+chat::Wide(result.output["error"].get<std::string>()):std::wstring(L"Mouse circle passed: pointer positions verified throughout the circle.");
-            if(active)chat::RunComputer({{"action","move"},{"x",state->origin.x},{"y",state->origin.y}},cancel);
+            if(active)chat::RunComputer({{"action","move"},{"x",state->origin.x},{"y",state->origin.y}},cancel,false);
             SetDlgItemTextW(window,403,status.c_str());
             SetWindowLongPtrW(window,DWLP_USER,0);delete state;
             EnableWindow(GetDlgItem(window,401),TRUE);EnableWindow(GetDlgItem(window,404),TRUE);
@@ -659,18 +659,29 @@ struct SettingsTabsState {
 INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     auto state=reinterpret_cast<SettingsTabsState*>(GetWindowLongPtrW(window,DWLP_USER));
     if(message==WM_INITDIALOG) {
-        InitModalChrome(window,L"Settings",640,474);
+        InitModalChrome(window,L"Settings",960,735);
         state=new SettingsTabsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
         for(int id:{105,106,107,110}) {
-            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":id==107?L"Computer Control":L"System Prompt",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale((id==110?3:id-105)*160),scale(Header),scale(160),scale(44),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
+            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":id==107?L"Computer Control":L"System Prompt",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale((id==110?3:id-105)*240),scale(Header),scale(240),scale(66),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
             SetWindowLongPtrW(button,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
         }
         auto page=[&](DLGPROC proc) {
             struct DialogTemplate {DLGTEMPLATE dialog;WORD menu,windowClass,title;} dialog{};
             dialog.dialog.style=WS_CHILD|WS_CLIPCHILDREN|DS_CONTROL;dialog.dialog.dwExtendedStyle=WS_EX_CONTROLPARENT;dialog.dialog.cx=400;dialog.dialog.cy=270;
             auto child=CreateDialogIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,window,proc,0);
-            MoveWindow(child,0,scale(Header+44),scale(640),scale(430),TRUE);return child;
+            if(!child)return child;
+            // Enlarge every settings page while retaining the normal readable font size.
+            EnumChildWindows(child,[](HWND control,LPARAM parent)->BOOL {
+                auto page=reinterpret_cast<HWND>(parent);if(GetParent(control)!=page)return TRUE;
+                RECT rect{};GetWindowRect(control,&rect);
+                wchar_t type[32]{};GetClassNameW(control,type,32);
+                if(lstrcmpiW(type,L"COMBOBOX")==0)SendMessageW(control,CB_GETDROPPEDCONTROLRECT,0,reinterpret_cast<LPARAM>(&rect));
+                MapWindowPoints(nullptr,page,reinterpret_cast<POINT*>(&rect),2);
+                MoveWindow(control,MulDiv(rect.left,3,2),MulDiv(rect.top,3,2),MulDiv(rect.right-rect.left,3,2),MulDiv(rect.bottom-rect.top,3,2),TRUE);
+                return TRUE;
+            },reinterpret_cast<LPARAM>(child));
+            MoveWindow(child,0,scale(Header+66),scale(960),scale(669),TRUE);return child;
         };
         state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);state->computer=page(ComputerSettingsProc);state->prompt=page(SystemPromptSettingsProc);
         if(!state->provider||!state->mcp||!state->computer||!state->prompt){EndDialog(window,IDCANCEL);return TRUE;}

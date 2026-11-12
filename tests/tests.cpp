@@ -358,6 +358,24 @@ int main(int argc,char** argv) {
         RECT fieldRect{};GetWindowRect(field,&fieldRect);
         nlohmann::json inputFixture={{"x",(fieldRect.left+fieldRect.right)/2},{"y",(fieldRect.top+fieldRect.bottom)/2}};
         POINT original{};GetCursorPos(&original);
+        POINT movementStart{fieldRect.left+12,(fieldRect.top+fieldRect.bottom)/2};
+        POINT movementEnd{fieldRect.right-12,movementStart.y};
+        Check(SetCursorPos(movementStart.x,movementStart.y)!=0,"Movement fixture positions cursor");
+        auto moving=std::async(std::launch::async,[&]{return RunComputer({{"action","move"},{"x",movementEnd.x},{"y",movementEnd.y}},cancel);});
+        int intermediatePositions=0;LONG lastX=movementStart.x;
+        while(moving.wait_for(0ms)!=std::future_status::ready) {
+            MSG event{};while(PeekMessageW(&event,nullptr,0,0,PM_REMOVE)){TranslateMessage(&event);DispatchMessageW(&event);}
+            POINT actual{};GetCursorPos(&actual);
+            if(actual.x>movementStart.x&&actual.x<movementEnd.x&&actual.x!=lastX){++intermediatePositions;lastX=actual.x;}
+            Sleep(5);
+        }
+        auto moved=moving.get();POINT arrived{};GetCursorPos(&arrived);
+        Check(moved.output.value("ok",false)&&arrived.x==movementEnd.x&&arrived.y==movementEnd.y&&intermediatePositions>=3,"Computer movement traverses intermediate desktop positions before success");
+        Cancellation stopMovement;
+        auto interrupted=std::async(std::launch::async,[&]{return RunComputer({{"action","click"},{"x",movementStart.x},{"y",movementStart.y}},stopMovement);});
+        Sleep(60);auto stoppedAt=std::chrono::steady_clock::now();stopMovement.Cancel();
+        Check(interrupted.wait_for(1s)==std::future_status::ready,"Computer motion cancellation interrupts pacing promptly");
+        Check(interrupted.get().output.contains("error")&&std::chrono::steady_clock::now()-stoppedAt<1s,"Cancelled motion does not report a successful click");
         bool delivered=true;
         for(const auto path:{L"/agent-computer-input-stream",L"/agent-computer-input-json"}) {
             SetWindowTextW(field,L"");SetForegroundWindow(target);
