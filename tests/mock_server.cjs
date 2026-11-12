@@ -193,7 +193,7 @@ server.listen(0, '127.0.0.1', () => {
   const executableFlag=process.argv.indexOf('--test-executable');
   const testExecutable=executableFlag<0?(ui?'build/chat-preview.exe':'build/chat-tests.exe'):process.argv[executableFlag+1];
   if(!testExecutable){console.error('--test-executable requires a path');server.close();process.exitCode=1;return;}
-  const child = ui ? spawn('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File','tests/ui_smoke.ps1','-Executable',path.resolve(testExecutable),'-ModelServerPort',String(server.address().port)],{stdio:'inherit',windowsHide:true}) : spawn(path.resolve(testExecutable), [String(server.address().port)], {stdio:'inherit', windowsHide:true});
+  const child = ui ? spawn('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File','tests/ui_smoke.ps1','-Executable',path.resolve(testExecutable),'-ModelServerPort',String(server.address().port),...(process.argv.includes('--skip-computer-access')?['-SkipComputerAccess']:[])],{stdio:'inherit',windowsHide:true}) : spawn(path.resolve(testExecutable), [String(server.address().port)], {stdio:'inherit', windowsHide:true});
   const timer = setTimeout(() => { child.kill(); console.error('Test deadline exceeded'); }, 30000);
   child.on('error', error => { console.error(error.message); clearTimeout(timer);server.close();process.exitCode=1; });
   child.on('exit', code => { clearTimeout(timer);server.closeAllConnections();server.close();if(ui&&attachmentRequests!==1){console.error('Expected one request with dropped attachment contents');process.exitCode=1;}else process.exitCode=code ?? 1; });

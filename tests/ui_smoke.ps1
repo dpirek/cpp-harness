@@ -1,4 +1,4 @@
-param([switch]$KeepOpen,[string]$Executable='build\chat.exe',[int]$ModelServerPort=0)
+param([switch]$KeepOpen,[string]$Executable='build\chat.exe',[int]$ModelServerPort=0,[switch]$SkipComputerAccess)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -63,6 +63,7 @@ public static class UiCheck {
 '@
 $null=[UiCheck]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $root=Split-Path $PSScriptRoot -Parent
+if(![IO.Path]::IsPathRooted($Executable)){$Executable=Join-Path $root $Executable}
 function AssertModalChrome([IntPtr]$modal) {
  $bounds=New-Object UiCheck+Rect;$client=New-Object UiCheck+Rect;$closeBounds=New-Object UiCheck+Rect
  $null=[UiCheck]::GetWindowRect($modal,[ref]$bounds);$null=[UiCheck]::GetClientRect($modal,[ref]$client)
@@ -88,13 +89,13 @@ function SaveWindowPreview([IntPtr]$target,[string]$name) {
 if($ModelServerPort){
  $isolated=Join-Path $root 'build\ui-settings-test'
  $null=New-Item -ItemType Directory -Force -Path $isolated
- Copy-Item -LiteralPath (Join-Path $root $Executable) -Destination (Join-Path $isolated 'chat.exe') -Force
+ Copy-Item -LiteralPath $Executable -Destination (Join-Path $isolated 'chat.exe') -Force
  Set-Content -LiteralPath (Join-Path $isolated '.env') -Value ''
  Remove-Item -LiteralPath (Join-Path $isolated 'provider-settings.json') -ErrorAction SilentlyContinue
  Remove-Item -LiteralPath (Join-Path $isolated 'chat-history.json') -ErrorAction SilentlyContinue
- $Executable='build\ui-settings-test\chat.exe'
+ $Executable=Join-Path $isolated 'chat.exe'
 }
-$process=Start-Process -FilePath (Join-Path $root $Executable) -WindowStyle Hidden -PassThru
+$process=Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
 $window=[IntPtr]::Zero
 try {
  $null=$process.WaitForInputIdle(5000)
@@ -221,6 +222,7 @@ try {
   $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]105,[IntPtr]::Zero)
   if(![UiCheck]::IsWindowVisible([UiCheck]::GetDlgItem($dialog,101)) -or [UiCheck]::IsWindowVisible([UiCheck]::GetDlgItem($dialog,201))){throw 'Provider tab must restore its panel.'}
  }
+ if(!$SkipComputerAccess){
  $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]107,[IntPtr]::Zero)
  $testButton=[UiCheck]::GetDlgItem($dialog,401)
  if($testButton -eq [IntPtr]::Zero -or ![UiCheck]::IsWindowVisible($testButton)){throw 'Computer Control tab is missing its access test.'}
@@ -243,6 +245,7 @@ try {
  $null=[UiCheck]::GetText([UiCheck]::GetDlgItem($dialog,403),13,[IntPtr]1024,$circleStatus)
  if(!$circleStatus.ToString().StartsWith('Mouse circle passed:')){throw "Mouse circle test failed: $circleStatus"}
  SaveWindowPreview $dialog 'computer-settings-preview.png'
+ }
  $null=[UiCheck]::SendMessage($dialog,0x111,[IntPtr]2,[IntPtr]::Zero)
  if(![UiCheck]::IsWindowEnabled($window)){throw 'Cancel must restore the main window.'}
  $null=[UiCheck]::SendMessage($window,0x111,[IntPtr]0x10004,[IntPtr]::Zero)
@@ -379,6 +382,23 @@ try {
   $wide=[int][Math]::Round(900*[UiCheck]::GetDpiForWindow($window)/96)
   $null=[UiCheck]::SetWindowPos($window,[IntPtr]::Zero,60,60,$wide,1200,0x14)
   if(![UiCheck]::IsWindowVisible($list)){throw 'Expanded sidebar must show chat history.'}
+  function DeleteHistoryRow([int]$index) {
+   $historyList=[UiCheck]::GetDlgItem($window,7)
+   $null=[UiCheck]::SendMessage($historyList,0x197,[IntPtr]$index,[IntPtr]::Zero)
+   $rowHeight=[int][UiCheck]::SendMessage($historyList,0x1a1,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64()
+   $bounds=New-Object UiCheck+Rect;$null=[UiCheck]::GetClientRect($historyList,[ref]$bounds)
+   $x=$bounds.Right-[int][Math]::Round(20*[UiCheck]::GetDpiForWindow($window)/96)
+   $position=[IntPtr](($rowHeight/2 -shl 16) -bor $x)
+   $null=[UiCheck]::SendMessage($historyList,0x200,[IntPtr]::Zero,$position)
+   SaveWindowPreview $window 'chat-delete-hover-preview.png'
+   $null=[UiCheck]::SendMessage($historyList,0x201,[IntPtr]1,$position)
+   $null=[UiCheck]::SendMessage($historyList,0x202,[IntPtr]::Zero,$position)
+  }
+  $deleteId=$after.active_chat_id
+  DeleteHistoryRow 0
+  $afterDelete=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  if($afterDelete.chats.id -contains $deleteId -or $afterDelete.active_chat_id -ne $previousId){throw 'Deleting an inactive chat must preserve the active chat.'}
+  if(!(Test-Path -LiteralPath (Join-Path $isolated ('.workspace/'+$deleteId)))){throw 'Deleting history must keep workspace files.'}
   SaveWindowPreview $window 'chat-history-preview.png'
  }
  $minimize=[UiCheck]::GetDlgItem($window,10)
@@ -390,7 +410,7 @@ try {
  if($ModelServerPort){
   $null=[UiCheck]::SendMessage([UiCheck]::GetDlgItem($window,12),0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
   if(!$process.WaitForExit(5000)){throw 'Chat app did not close for history restore test.'}
-  $process=Start-Process -FilePath (Join-Path $root $Executable) -WindowStyle Hidden -PassThru
+  $process=Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
   $null=$process.WaitForInputIdle(5000)
   $window=[UiCheck]::Find($process.Id)
   if($window -eq [IntPtr]::Zero){throw 'Chat app did not reopen.'}
@@ -399,6 +419,18 @@ try {
   if($restoredDraft.ToString() -ne 'Keep this draft'){throw 'Restart must restore the active chat draft.'}
   $restoredHistory=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
   if($restoredHistory.active_chat_id -ne $previousId){throw 'Restart must restore the active chat.'}
+  $send=[UiCheck]::GetDlgItem($window,5)
+  $null=[UiCheck]::SendMessage($send,0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
+  $historyList=[UiCheck]::GetDlgItem($window,7)
+  $activeIndex=[int][UiCheck]::SendMessage($historyList,0x188,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64()
+  DeleteHistoryRow $activeIndex
+  $deletedActive=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  if($deletedActive.chats.id -contains $previousId -or $deletedActive.active_chat_id -eq $previousId){throw 'Deleting a running active chat must stop it and remove its history.'}
+  while(@($deletedActive.chats).Count -gt 1){DeleteHistoryRow 0;$deletedActive=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json}
+  $lastId=$deletedActive.active_chat_id
+  DeleteHistoryRow 0
+  $empty=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+  if(@($empty.chats).Count -ne 1 -or $empty.active_chat_id -eq $lastId -or @($empty.chats[0].messages).Count -ne 0){throw 'Deleting the last chat must open a fresh empty conversation.'}
  }
  Write-Output 'UI passed: settings, chat history restoration, per-chat workspaces, prompt layout, and window controls.'
 } finally {

@@ -50,6 +50,8 @@ std::vector<chat::Message> apiHistory;
 std::vector<chat::Attachment> pendingAttachments;
 std::unique_ptr<chat::ChatWorker> worker;
 chat::ChatHistory savedHistory;
+int hoveredChat=-1;
+std::string pressedDeleteChat;
 bool historyWritable=true,restoringChat=false;
 std::wstring historyError;
 void StopAgent();
@@ -130,11 +132,11 @@ void Layout() {
     layout.conversation={left,Px(Header+Space),left+columnWidth,layout.composer.top-Px(Space)};
     // A 40 DIP icon button has 16 DIP clearance around its hover rectangle.
     int iconLeft=sidebarWide?sideWidth-Px(56):(sideWidth-Px(40))/2;
-    MoveWindow(historyButton,0,Px(Header+72+56+8),Px(72),Px(40),TRUE);ShowWindow(historyButton,sidebarWide?SW_HIDE:SW_SHOW);
-    MoveWindow(historyList,Px(12),Px(Header+72+56+60),std::max(1,sideWidth-Px(24)),std::max(1,height-Px(Header+72+56+60+112)),TRUE);
+    MoveWindow(historyButton,0,Px(Header+72+56),Px(72),Px(56),TRUE);ShowWindow(historyButton,sidebarWide?SW_HIDE:SW_SHOW);
+    MoveWindow(historyList,Px(12),Px(Header+72+56+60),std::max(1,sideWidth-Px(24)),std::max(1,height-Px(Header+72+56+60+120)),TRUE);
     ShowWindow(historyList,sidebarWide?SW_SHOW:SW_HIDE);
-    MoveWindow(workspaceButton,Px(12),height-Px(104),std::max(1,sideWidth-Px(24)),Px(32),TRUE);
-    ShowWindow(workspaceButton,sidebarWide?SW_SHOW:SW_HIDE);
+    MoveWindow(workspaceButton,0,sidebarWide?height-Px(120):Px(Header+72+56*2),sideWidth,Px(56),TRUE);
+    ShowWindow(workspaceButton,SW_SHOW);
     MoveWindow(newButton,0,Px(Header+72),sideWidth,Px(56),TRUE);
     MoveWindow(settingsButton,iconLeft,height-Px(56),Px(40),Px(40),TRUE);
     MoveWindow(sidebarToggle,iconLeft,Px(Header+16),Px(40),Px(40),TRUE);
@@ -155,6 +157,7 @@ void Layout() {
 }
 void RefreshChats() {
     if(!historyList)return;
+    hoveredChat=-1;pressedDeleteChat.clear();
     SendMessageW(historyList,LB_RESETCONTENT,0,0);
     for(size_t i=0;i<savedHistory.chats.size();++i) {
         SendMessageW(historyList,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(savedHistory.chats[i].title.c_str()));
@@ -187,6 +190,65 @@ void OpenChat(size_t index) {
         messages=item.messages;apiHistory=item.context;restoringChat=true;SetWindowTextW(input,item.draft.c_str());restoringChat=false;break;
     }
     savedHistory.activeId=id;scroll=1000000;PersistChat();Layout();SetFocus(input);
+}
+RECT ChatDeleteRect(RECT row) {return {row.right-Px(36),row.top+Px(2),row.right-Px(4),row.bottom-Px(2)};}
+int HistoryRowAt(HWND window,POINT point) {
+    RECT client{};GetClientRect(window,&client);if(!PtInRect(&client,point))return -1;
+    auto hit=SendMessageW(window,LB_ITEMFROMPOINT,0,MAKELPARAM(point.x,point.y));
+    int index=LOWORD(hit);RECT row{};
+    if(HIWORD(hit)||index>=static_cast<int>(savedHistory.chats.size())||SendMessageW(window,LB_GETITEMRECT,index,reinterpret_cast<LPARAM>(&row))==LB_ERR||!PtInRect(&row,point))return -1;
+    return index;
+}
+void DeleteChat(size_t index) {
+    if(index>=savedHistory.chats.size())return;
+    if(!historyWritable){ShowModalMessage(app,L"History could not be loaded. Repair chat-history.json and restart before deleting saved chats.",L"Chat history",MB_OK|MB_ICONERROR);return;}
+    auto id=savedHistory.chats[index].id;bool active=id==savedHistory.activeId;
+    if(active&&busy)StopAgent();else PersistChat();
+    try {
+        auto updated=savedHistory;
+        updated.chats.erase(std::remove_if(updated.chats.begin(),updated.chats.end(),[&](const auto& item){return item.id==id;}),updated.chats.end());
+        if(active) {
+            if(updated.chats.empty())updated.chats.push_back(chat::NewSavedChat(configDirectory,updated));
+            updated.activeId=updated.chats.front().id;
+        }
+        chat::SaveChatHistory(configDirectory,updated);
+        savedHistory=std::move(updated);
+        if(active) {
+            ++generation;streamingMessage.reset();currentPrompt.reset();pendingAttachments.clear();
+            for(const auto& item:savedHistory.chats)if(item.id==savedHistory.activeId){messages=item.messages;apiHistory=item.context;restoringChat=true;SetWindowTextW(input,item.draft.c_str());restoringChat=false;break;}
+            scroll=1000000;SetFocus(input);
+        }
+        RefreshChats();Layout();
+    }catch(const std::exception& error){ShowModalMessage(app,chat::Wide(error.what()).c_str(),L"Could not delete chat",MB_OK|MB_ICONERROR);}
+}
+LRESULT CALLBACK HistoryListProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+    if(message==WM_MOUSEMOVE) {
+        TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,window,0};TrackMouseEvent(&tracking);
+        hoveredChat=HistoryRowAt(window,point);InvalidateRect(window,nullptr,FALSE);
+    }
+    if(message==WM_MOUSELEAVE){hoveredChat=-1;InvalidateRect(window,nullptr,FALSE);}
+    if(message==WM_LBUTTONDOWN||message==WM_LBUTTONDBLCLK) {
+        int index=HistoryRowAt(window,point);RECT row{};
+        if(index>=0){SendMessageW(window,LB_GETITEMRECT,index,reinterpret_cast<LPARAM>(&row));auto button=ChatDeleteRect(row);
+            if(PtInRect(&button,point)){pressedDeleteChat=savedHistory.chats[index].id;SetCapture(window);return 0;}
+        }
+    }
+    if(message==WM_LBUTTONUP&&!pressedDeleteChat.empty()) {
+        auto id=pressedDeleteChat;pressedDeleteChat.clear();ReleaseCapture();
+        int index=HistoryRowAt(window,point);RECT row{};
+        if(index>=0&&savedHistory.chats[index].id==id){SendMessageW(window,LB_GETITEMRECT,index,reinterpret_cast<LPARAM>(&row));auto button=ChatDeleteRect(row);if(PtInRect(&button,point))DeleteChat(static_cast<size_t>(index));}
+        return 0;
+    }
+    if(message==WM_CAPTURECHANGED)pressedDeleteChat.clear();
+    if(message==WM_SETCURSOR) {
+        POINT cursor{};GetCursorPos(&cursor);ScreenToClient(window,&cursor);int index=HistoryRowAt(window,cursor);RECT row{};
+        if(index>=0){SendMessageW(window,LB_GETITEMRECT,index,reinterpret_cast<LPARAM>(&row));auto button=ChatDeleteRect(row);if(PtInRect(&button,cursor)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}}
+    }
+    auto result=DefSubclassProc(window,message,wParam,lParam);
+    if(message==WM_MOUSEWHEEL||message==WM_VSCROLL){POINT cursor{};GetCursorPos(&cursor);ScreenToClient(window,&cursor);hoveredChat=HistoryRowAt(window,cursor);InvalidateRect(window,nullptr,FALSE);}
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,HistoryListProc,1);
+    return result;
 }
 void Reset() {
     if(busy)StopAgent();else PersistChat();
@@ -838,8 +900,13 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
         Text(dc,item.CtlID==2?L"\uf3e5":L"\uf45d",rect,navIconFont,Ink,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
     } else if(!caption) {
         RECT icon=sidebarWide?RECT{Px(Space),0,Px(Space+20),rect.bottom}:rect;
-        Text(dc,L"\uf64d",icon,navIconFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_CENTER|DT_NOPREFIX);
-        if(sidebarWide)Text(dc,L"New chat",{Px(Space+32),0,rect.right-Px(Space),rect.bottom},bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+        if(item.CtlID==8) {
+            int x=(icon.left+icon.right)/2,y=(icon.top+icon.bottom)/2;
+            POINT folder[]{{x-Px(10),y-Px(7)},{x-Px(3),y-Px(7)},{x,y-Px(4)},{x+Px(10),y-Px(4)},{x+Px(10),y+Px(7)},{x-Px(10),y+Px(7)},{x-Px(10),y-Px(7)}};
+            auto pen=CreatePen(PS_SOLID,std::max(1,Px(1)),Ink);auto oldPen=SelectObject(dc,pen);Polyline(dc,folder,7);SelectObject(dc,oldPen);DeleteObject(pen);
+            Line(dc,x-Px(10),y-Px(1),x+Px(10),y-Px(1),Ink,std::max(1,Px(1)));
+        } else Text(dc,item.CtlID==9?L"\uf264":L"\uf64d",icon,navIconFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_CENTER|DT_NOPREFIX);
+        if(sidebarWide)Text(dc,item.CtlID==8?L"Open workspace":L"New chat",{Px(Space+32),0,rect.right-Px(Space),rect.bottom},bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
         Line(dc,rect.left,rect.bottom-1,rect.right,rect.bottom-1,Border);
         Line(dc,rect.right-1,rect.top,rect.right-1,rect.bottom,Border);
     } else {
@@ -962,15 +1029,14 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         auto button=[&](const wchar_t* name,int id){HWND control=CreateWindowW(L"BUTTON",name,WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);auto original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc)));if(!oldButtonProc)oldButtonProc=original;return control;};
         newButton=button(L"New chat",1);settingsButton=button(L"Settings",2);sidebarToggle=button(L"Collapse sidebar",4);sendButton=button(L"Send message",5);minButton=button(L"Minimize",10);maxButton=button(L"Restore",11);closeButton=button(L"Close",12);
         historyList=CreateWindowW(L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS|LBS_NOINTEGRALHEIGHT,0,0,0,0,window,reinterpret_cast<HMENU>(7),instance,nullptr);
+        SetWindowSubclass(historyList,HistoryListProc,1,0);
         SendMessageW(historyList,LB_SETITEMHEIGHT,0,Px(36));
-        historyButton=CreateWindowW(L"BUTTON",L"Chats",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,window,reinterpret_cast<HMENU>(9),instance,nullptr);
-        SendMessageW(historyButton,WM_SETFONT,reinterpret_cast<WPARAM>(smallFont),TRUE);
-        workspaceButton=CreateWindowW(L"BUTTON",L"Open workspace",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,window,reinterpret_cast<HMENU>(8),instance,nullptr);
-        SendMessageW(workspaceButton,WM_SETFONT,reinterpret_cast<WPARAM>(smallFont),TRUE);
+        historyButton=button(L"Chat history",9);
+        workspaceButton=button(L"Open workspace",8);
         clearAttachmentsButton=button(L"Remove attachments",6);ShowWindow(clearAttachmentsButton,SW_HIDE);
         INITCOMMONCONTROLSEX commonControls{sizeof(commonControls),ICC_WIN95_CLASSES};InitCommonControlsEx(&commonControls);
         navTooltips=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,nullptr,instance,nullptr);
-        for(auto control:{newButton,settingsButton,sidebarToggle,sendButton,clearAttachmentsButton}) {
+        for(auto control:{newButton,historyButton,workspaceButton,settingsButton,sidebarToggle,sendButton,clearAttachmentsButton}) {
             TOOLINFOW tool{};tool.cbSize=sizeof(tool);tool.uFlags=TTF_IDISHWND|TTF_SUBCLASS;tool.hwnd=window;tool.uId=reinterpret_cast<UINT_PTR>(control);tool.lpszText=LPSTR_TEXTCALLBACKW;
             SendMessageW(navTooltips,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tool));
         }
@@ -1012,7 +1078,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(notification->hwndFrom==navTooltips&&notification->code==TTN_GETDISPINFOW) {
             auto info=reinterpret_cast<NMTTDISPINFOW*>(lParam);
             auto control=reinterpret_cast<HWND>(info->hdr.idFrom);
-            info->lpszText=const_cast<wchar_t*>(control==clearAttachmentsButton?L"Remove attachments":control==sendButton?(busy?L"Stop agent":L"Send message"):control==sidebarToggle?(sidebarWide?L"Collapse sidebar (Ctrl+B)":L"Expand sidebar (Ctrl+B)"):control==settingsButton?L"Settings":L"New chat");
+            info->lpszText=const_cast<wchar_t*>(control==clearAttachmentsButton?L"Remove attachments":control==sendButton?(busy?L"Stop agent":L"Send message"):control==sidebarToggle?(sidebarWide?L"Collapse sidebar (Ctrl+B)":L"Expand sidebar (Ctrl+B)"):control==settingsButton?L"Settings":control==historyButton?L"Chat history":control==workspaceButton?L"Open workspace":L"New chat");
             return 0;
         }
         break;
@@ -1086,7 +1152,25 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
     case WM_CTLCOLOREDIT:SetTextColor(reinterpret_cast<HDC>(wParam),Ink);SetBkColor(reinterpret_cast<HDC>(wParam),Surface);return reinterpret_cast<LRESULT>(surfaceBrush);
     case WM_DRAWITEM: {
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-        if(wParam==7){Fill(item.hDC,item.rcItem,(item.itemState&ODS_SELECTED)?Surface:Background);if(item.itemID<savedHistory.chats.size()){auto rect=item.rcItem;rect.left+=Px(12);rect.right-=Px(8);Text(item.hDC,savedHistory.chats[item.itemID].title,rect,bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);}return TRUE;}
+        if(wParam==7){
+            bool hovered=static_cast<int>(item.itemID)==hoveredChat;
+            Fill(item.hDC,item.rcItem,(item.itemState&ODS_SELECTED)?Surface:hovered?Panel:Background);
+            if(item.itemID<savedHistory.chats.size()) {
+                auto rect=item.rcItem;rect.left+=Px(12);rect.right-=Px(hovered?40:8);
+                Text(item.hDC,savedHistory.chats[item.itemID].title,rect,bodyFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+                if(hovered) {
+                    auto button=ChatDeleteRect(item.rcItem);POINT cursor{};GetCursorPos(&cursor);ScreenToClient(historyList,&cursor);
+                    auto color=PtInRect(&button,cursor)?RGB(244,161,148):Muted;
+                    int x=(button.left+button.right)/2,y=(button.top+button.bottom)/2;
+                    Line(item.hDC,x-Px(6),y-Px(5),x+Px(6),y-Px(5),color);
+                    Line(item.hDC,x-Px(4),y-Px(3),x-Px(4),y+Px(6),color);Line(item.hDC,x+Px(4),y-Px(3),x+Px(4),y+Px(6),color);
+                    Line(item.hDC,x-Px(4),y+Px(6),x+Px(4),y+Px(6),color);
+                    Line(item.hDC,x-Px(2),y-Px(7),x+Px(2),y-Px(7),color);
+                    Line(item.hDC,x-Px(1),y-Px(2),x-Px(1),y+Px(3),color);Line(item.hDC,x+Px(1),y-Px(2),x+Px(1),y+Px(3),color);
+                }
+            }
+            return TRUE;
+        }
         DrawButton(item);return TRUE;
     }
     case WM_PAINT: {
