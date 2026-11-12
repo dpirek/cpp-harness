@@ -104,7 +104,8 @@ int PromptLines(HDC dc,int width) {
     }while(paragraph<=value.size());
     return std::max(1,lines);
 }
-void Layout() {
+void Layout(bool promptOnly=false) {
+    auto previousComposer=layout.composer;auto previousColumn=layout.column;
     GetClientRect(app,&layout.client);
     int width=layout.client.right,height=layout.client.bottom;
     if(width<=0||height<=0)return;
@@ -117,7 +118,6 @@ void Layout() {
     // Measure the text independently of the edit's current one-line viewport.
     int inputWidth=columnWidth-Px(88);
     RECT previousInput{};GetClientRect(input,&previousInput);
-    SetWindowPos(input,nullptr,0,0,inputWidth,std::max(1L,previousInput.bottom),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW);
     HDC dc=GetDC(input);auto oldFont=SelectObject(dc,bodyFont);TEXTMETRICW metrics{};GetTextMetricsW(dc,&metrics);
     int measuredLines=PromptLines(dc,inputWidth);SelectObject(dc,oldFont);ReleaseDC(input,dc);
     int lineHeight=std::max(1L,metrics.tmHeight);
@@ -130,6 +130,8 @@ void Layout() {
     layout.column={left,Px(Header+Space),left+columnWidth,height-Px(Space)};
     layout.composer={left,height-Px(Space)-composerHeight,left+columnWidth,height-Px(Space)};
     layout.conversation={left,Px(Header+Space),left+columnWidth,layout.composer.top-Px(Space)};
+    if(promptOnly&&EqualRect(&previousComposer,&layout.composer)&&EqualRect(&previousColumn,&layout.column))return;
+    if(!promptOnly) {
     // A 40 DIP icon button has 16 DIP clearance around its hover rectangle.
     int iconLeft=sidebarWide?sideWidth-Px(56):(sideWidth-Px(40))/2;
     MoveWindow(historyButton,0,Px(Header+72+56),Px(72),Px(56),TRUE);ShowWindow(historyButton,sidebarWide?SW_HIDE:SW_SHOW);
@@ -141,19 +143,25 @@ void Layout() {
     MoveWindow(settingsButton,iconLeft,height-Px(56),Px(40),Px(40),TRUE);
     MoveWindow(sidebarToggle,iconLeft,Px(Header+16),Px(40),Px(40),TRUE);
     SetWindowTextW(sidebarToggle,sidebarWide?L"Collapse sidebar":L"Expand sidebar");
+    }
     int inputTop=layout.composer.top+attachmentHeight+(bodyHeight-inputHeight)/2;
-    MoveWindow(input,left+Px(24),inputTop,inputWidth,inputHeight,TRUE);
+    SetWindowPos(input,nullptr,left+Px(24),inputTop,inputWidth,inputHeight,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW);
     MoveWindow(clearAttachmentsButton,layout.composer.right-Px(48),layout.composer.top+Px(8),Px(32),Px(32),TRUE);
     ShowWindow(clearAttachmentsButton,pendingAttachments.empty()?SW_HIDE:SW_SHOW);
     MoveWindow(sendButton,layout.composer.right-Px(48),layout.composer.bottom-Px(48),Px(32),Px(32),TRUE);
-    RECT formatting{0,0,inputWidth,inputHeight};SendMessageW(input,EM_SETRECTNP,0,reinterpret_cast<LPARAM>(&formatting));
-    SendMessageW(input,EM_SCROLLCARET,0,0);
+    if(previousInput.right!=inputWidth||previousInput.bottom!=inputHeight) {
+        RECT formatting{0,0,inputWidth,inputHeight};SendMessageW(input,EM_SETRECTNP,0,reinterpret_cast<LPARAM>(&formatting));
+        SendMessageW(input,EM_SCROLLCARET,0,0);
+    }
+    RedrawWindow(input,nullptr,nullptr,RDW_INVALIDATE|RDW_NOERASE);
+    if(!promptOnly) {
     int size=Px(Header);
     MoveWindow(minButton,width-size*3,0,size,size,TRUE);
     MoveWindow(maxButton,width-size*2,0,size,size,TRUE);
     MoveWindow(closeButton,width-size,0,size,size,TRUE);
     SetWindowTextW(maxButton,IsZoomed(app)?L"Restore":L"Maximize");
-    InvalidateRect(app,nullptr,TRUE);
+    }
+    InvalidateRect(app,nullptr,FALSE);
 }
 void RefreshChats() {
     if(!historyList)return;
@@ -680,7 +688,7 @@ LRESULT CALLBACK InputProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam)
     if(message==WM_KEYDOWN&&wParam==VK_RETURN&&!(GetKeyState(VK_SHIFT)&0x8000)){Send();return 0;}
     if(message==WM_CHAR&&wParam==L'\r'&&!(GetKeyState(VK_SHIFT)&0x8000))return 0;
     LRESULT result=CallWindowProcW(oldInputProc,window,message,wParam,lParam);
-    if(message==WM_SETTEXT)Layout(); // Multiline edits do not notify EN_CHANGE here.
+    if(message==WM_SETTEXT)Layout(true); // Multiline edits do not notify EN_CHANGE here.
     if(message==WM_PAINT&&GetWindowTextLengthW(window)==0) {
         HDC dc=GetDC(window);RECT rect;GetClientRect(window,&rect);
         Text(dc,L"Ask anything or drop files...",rect,bodyFont,Muted);ReleaseDC(window,dc);
@@ -1071,7 +1079,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(LOWORD(wParam)==6&&HIWORD(wParam)==BN_CLICKED){pendingAttachments.clear();Layout();SetFocus(input);return 0;}
         if(LOWORD(wParam)==4){sidebarExpanded=!sidebarExpanded;Layout();return 0;}
         if(HIWORD(wParam)==BN_CLICKED){switch(LOWORD(wParam)){case 1:Reset();break;case 2:OpenSettings();break;case 5:if(busy)StopAgent();else Send();break;case 10:ShowWindow(window,SW_MINIMIZE);break;case 11:ShowWindow(window,IsZoomed(window)?SW_RESTORE:SW_MAXIMIZE);break;case 12:PostMessageW(window,WM_CLOSE,0,0);break;}}
-        if(HIWORD(wParam)==EN_CHANGE){Layout();InvalidateRect(input,nullptr,FALSE);if(LOWORD(wParam)==3&&!restoringChat)SetTimer(window,9,700,nullptr);}
+        if(HIWORD(wParam)==EN_CHANGE&&LOWORD(wParam)==3){Layout(true);if(!restoringChat)SetTimer(window,9,700,nullptr);}
         return 0;
     case WM_NOTIFY: {
         auto notification=reinterpret_cast<NMHDR*>(lParam);
