@@ -36,7 +36,13 @@ HANDLE iconFontResource=nullptr;
 std::map<std::pair<int,unsigned>,HFONT> markdownFonts;
 struct ResponseLink {RECT rect;std::wstring href;};
 std::vector<ResponseLink> responseLinks;
-HBRUSH surfaceBrush;
+using TextPosition=std::pair<size_t,size_t>;
+struct TextGlyph {RECT rect;std::wstring text;TextPosition position;};
+std::vector<TextGlyph> textGlyphs;
+TextPosition textAnchor{},textEnd{};
+size_t textMessage=0,textOffset=0;
+bool captureText=false,dragText=false;
+HBRUSH surfaceBrush,composerBackdropBrush;
 WNDPROC oldInputProc,oldButtonProc;
 UINT dpi=96;
 bool busy=false;
@@ -48,6 +54,9 @@ std::wstring promptRecallDraft;
 DWORD promptDraftSelection=0;
 bool recallingPrompt=false;
 int scroll=0,sideWidth=260;
+int conversationExtent=0,conversationPage=1;
+bool scrollDragging=false,scrollHovered=false;
+int scrollDragOffset=0,scrollRepeatDirection=0;
 unsigned generation=0;
 std::filesystem::path configDirectory;
 std::vector<chat::Message> messages;
@@ -68,9 +77,62 @@ void Line(HDC dc,int x,int y,int endX,int endY,COLORREF color=Border,int width=1
     auto pen=CreatePen(PS_SOLID,width,color);auto previous=SelectObject(dc,pen);
     MoveToEx(dc,x,y,nullptr);LineTo(dc,endX,endY);SelectObject(dc,previous);DeleteObject(pen);
 }
+bool HasTextSelection(){return textAnchor!=textEnd;}
+void RecordGlyphs(HDC dc,const std::wstring& value,int x,int y) {
+    if(!captureText)return;
+    TEXTMETRICW tm{};GetTextMetricsW(dc,&tm);int previous=0;
+    for(size_t i=0;i<value.size();) {
+        size_t count=(value[i]>=0xd800&&value[i]<=0xdbff&&i+1<value.size())?2:1;
+        SIZE size{};GetTextExtentPoint32W(dc,value.data(),static_cast<int>(i+count),&size);
+        textGlyphs.push_back({{x+previous,y,x+size.cx,y+tm.tmHeight},value.substr(i,count),{textMessage,textOffset++}});
+        previous=size.cx;i+=count;
+    }
+}
+TextPosition HitChatText(POINT point) {
+    long long best=0x7fffffffffffffffLL;TextPosition result{};
+    for(const auto& glyph:textGlyphs) {
+        const auto& r=glyph.rect;
+        if(r.bottom<layout.conversation.top||r.top>=layout.conversation.bottom)continue;
+        long long dy=point.y<r.top?r.top-point.y:point.y>=r.bottom?point.y-r.bottom+1:0;
+        long long dx=point.x<r.left?r.left-point.x:point.x>r.right?point.x-r.right:0;
+        auto distance=dy*dy*1000000+dx*dx;
+        if(distance<best){best=distance;result=glyph.position;if(point.x>(r.left+r.right)/2)++result.second;}
+    }
+    return result;
+}
+void CopyChatSelection() {
+    std::wstring value;const TextGlyph* previous=nullptr;
+    auto first=std::min(textAnchor,textEnd),last=std::max(textAnchor,textEnd);
+    for(const auto& glyph:textGlyphs)if(glyph.position>=first&&glyph.position<last) {
+        if(previous) {
+            if(previous->position.first!=glyph.position.first)value+=L"\r\n\r\n";
+            else if(glyph.rect.top>=previous->rect.bottom)value+=L"\r\n";
+        }
+        value+=glyph.text;previous=&glyph;
+    }
+    if(value.empty()||!OpenClipboard(app))return;
+    auto memory=GlobalAlloc(GMEM_MOVEABLE,(value.size()+1)*sizeof(wchar_t));
+    if(memory) {
+        auto data=GlobalLock(memory);
+        if(data){memcpy(data,value.c_str(),(value.size()+1)*sizeof(wchar_t));GlobalUnlock(memory);EmptyClipboard();if(!SetClipboardData(CF_UNICODETEXT,memory))GlobalFree(memory);}
+        else GlobalFree(memory);
+    }
+    CloseClipboard();
+}
 void Text(HDC dc,const std::wstring& value,RECT rect,HFONT font,COLORREF color=Ink,UINT flags=DT_LEFT|DT_WORDBREAK|DT_NOPREFIX) {
     SelectObject(dc,font);SetTextColor(dc,color);SetBkMode(dc,TRANSPARENT);
     DrawTextW(dc,value.c_str(),-1,&rect,flags);
+    if(captureText) {
+        TEXTMETRICW tm{};GetTextMetricsW(dc,&tm);int y=rect.top;size_t start=0;
+        while(start<value.size()) {
+            auto end=value.find_first_of(L"\r\n",start);if(end==value.npos)end=value.size();
+            int fit=0;SIZE size{};GetTextExtentExPointW(dc,value.data()+start,static_cast<int>(end-start),std::max(1L,rect.right-rect.left),&fit,nullptr,&size);
+            size_t take=(flags&DT_SINGLELINE)?end-start:std::min(end-start,static_cast<size_t>(std::max(1,fit)));
+            if(start+take<end){auto space=value.find_last_of(L" \t",start+take);if(space!=value.npos&&space>start)take=space-start+1;}
+            RecordGlyphs(dc,value.substr(start,take),rect.left,y);y+=tm.tmHeight;start+=take;
+            if(start==end&&end<value.size()){++start;if(value[end]==L'\r'&&start<value.size()&&value[start]==L'\n')++start;}
+        }
+    }
 }
 void Round(HDC dc,RECT rect,COLORREF color,int radius) {
     auto brush=CreateSolidBrush(color);auto oldBrush=SelectObject(dc,brush);auto oldPen=SelectObject(dc,GetStockObject(NULL_PEN));
@@ -132,9 +194,9 @@ void Layout(bool promptOnly=false) {
     int attachmentHeight=pendingAttachments.empty()?0:Px(40);
     int bodyHeight=std::max(inputHeight+Px(32),Px(64));
     int composerHeight=bodyHeight+attachmentHeight;
-    layout.column={left,Px(Header+Space),left+columnWidth,height-Px(Space)};
+    layout.column={left,Px(Header),left+columnWidth,height-Px(Space)};
     layout.composer={left,height-Px(Space)-composerHeight,left+columnWidth,height-Px(Space)};
-    layout.conversation={left,Px(Header+Space),left+columnWidth,layout.composer.top-Px(Space)};
+    layout.conversation={left,Px(Header),left+columnWidth,height};
     if(promptOnly&&EqualRect(&previousComposer,&layout.composer)&&EqualRect(&previousColumn,&layout.column))return;
     if(!promptOnly) {
     // A 40 DIP icon button has 16 DIP clearance around its hover rectangle.
@@ -209,7 +271,7 @@ void OpenChat(size_t index) {
     for(const auto& item:savedHistory.chats)if(item.id==id) {
         messages=item.messages;apiHistory=item.context;restoringChat=true;SetWindowTextW(input,item.draft.c_str());restoringChat=false;break;
     }
-    savedHistory.activeId=id;scroll=1000000;PersistChat();Layout();SetFocus(input);
+    textAnchor=textEnd={};savedHistory.activeId=id;scroll=1000000;PersistChat();Layout();SetFocus(input);
 }
 RECT ChatDeleteRect(RECT row) {return {row.right-Px(36),row.top+Px(2),row.right-Px(4),row.bottom-Px(2)};}
 int HistoryRowAt(HWND window,POINT point) {
@@ -236,7 +298,7 @@ void DeleteChat(size_t index) {
         if(active) {
             ++generation;streamingMessage.reset();currentPrompt.reset();pendingAttachments.clear();
             for(const auto& item:savedHistory.chats)if(item.id==savedHistory.activeId){messages=item.messages;apiHistory=item.context;restoringChat=true;SetWindowTextW(input,item.draft.c_str());restoringChat=false;break;}
-            scroll=1000000;SetFocus(input);
+            textAnchor=textEnd={};scroll=1000000;SetFocus(input);
         }
         RefreshChats();Layout();
     }catch(const std::exception& error){ShowModalMessage(app,chat::Wide(error.what()).c_str(),L"Could not delete chat",MB_OK|MB_ICONERROR);}
@@ -272,7 +334,7 @@ LRESULT CALLBACK HistoryListProc(HWND window,UINT message,WPARAM wParam,LPARAM l
 }
 void Reset() {
     if(busy)StopAgent();else PersistChat();
-    worker->Cancel();++generation;busy=false;streamingMessage.reset();currentPrompt.reset();messages.clear();apiHistory.clear();scroll=0;
+    worker->Cancel();++generation;busy=false;streamingMessage.reset();currentPrompt.reset();messages.clear();apiHistory.clear();textAnchor=textEnd={};scroll=0;
     pendingAttachments.clear();
     SetWindowTextW(sendButton,L"Send message");InvalidateRect(sendButton,nullptr,TRUE);
     restoringChat=true;SetWindowTextW(input,L"");restoringChat=false;savedHistory.activeId.clear();PersistChat();InvalidateRect(app,nullptr,TRUE);SetFocus(input);
@@ -714,7 +776,12 @@ void RecallPrompt(bool previous) {
     } else {recalledPrompt=position;auto end=GetWindowTextLengthW(input);SendMessageW(input,EM_SETSEL,end,end);}
     SendMessageW(input,EM_SCROLLCARET,0,0);
 }
+void AlignComposerBrush(HDC dc,HWND control);
 LRESULT CALLBACK InputProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    if(message==WM_ERASEBKGND&&composerBackdropBrush) {
+        auto dc=reinterpret_cast<HDC>(wParam);RECT rect{};GetClientRect(window,&rect);
+        AlignComposerBrush(dc,window);FillRect(dc,&rect,composerBackdropBrush);return 1;
+    }
     if(message==WM_DROPFILES)return SendMessageW(app,message,wParam,lParam);
     if(message==WM_KEYDOWN) {
         bool control=(GetKeyState(VK_CONTROL)&0x8000)!=0,shift=(GetKeyState(VK_SHIFT)&0x8000)!=0,alt=(GetKeyState(VK_MENU)&0x8000)!=0;
@@ -746,7 +813,10 @@ LRESULT CALLBACK InputProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam)
     if(message==WM_KEYDOWN&&wParam==VK_RETURN&&!(GetKeyState(VK_SHIFT)&0x8000)){Send();return 0;}
     if(message==WM_CHAR&&wParam==L'\r'&&!(GetKeyState(VK_SHIFT)&0x8000))return 0;
     LRESULT result=CallWindowProcW(oldInputProc,window,message,wParam,lParam);
-    if(message==WM_SETTEXT)Layout(true); // Multiline edits do not notify EN_CHANGE here.
+    if(message==WM_SETTEXT) {
+        Layout(true); // Multiline edits do not notify EN_CHANGE here.
+        RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE);
+    }
     if(message==WM_PAINT&&GetWindowTextLengthW(window)==0) {
         HDC dc=GetDC(window);RECT rect;GetClientRect(window,&rect);
         Text(dc,L"Ask anything or drop files...",rect,bodyFont,Muted);ReleaseDC(window,dc);
@@ -777,7 +847,7 @@ int CodeText(HDC dc,const chat::CodeBlock& block,RECT rect,bool paint) {
         for(size_t i=0;i<block.text.size();++i) {
             wchar_t c=block.text[i];if(c==L'\r')continue;
             if(c==L'\n'){++row;column=0;continue;}
-            if(c==L'\t'){int spaces=4-column%4;while(spaces--){if(column>=columns){++row;column=0;}++column;}continue;}
+            if(c==L'\t'){int spaces=4-column%4;while(spaces--){if(column>=columns){++row;column=0;}if(paint)glyphs.push_back({L' ',row,column,colors[i]});++column;}continue;}
             if(column>=columns){++row;column=0;}
             if(paint)glyphs.push_back({c,row,column,colors[i]});++column;
         }
@@ -790,6 +860,7 @@ int CodeText(HDC dc,const chat::CodeBlock& block,RECT rect,bool paint) {
             for(const auto& glyph:glyphs) {
                 COLORREF ink=Ink;
                 switch(glyph.color){case chat::CodeColor::String:ink=RGB(206,145,120);break;case chat::CodeColor::Comment:ink=RGB(106,153,85);break;case chat::CodeColor::Keyword:ink=RGB(197,134,192);break;case chat::CodeColor::Variable:ink=RGB(156,220,254);break;case chat::CodeColor::Tag:ink=RGB(86,156,214);break;case chat::CodeColor::Number:ink=RGB(181,206,168);break;default:break;}
+                RecordGlyphs(dc,std::wstring(1,glyph.value),rect.left+Px(12)+glyph.column*cell,y+Px(36)+glyph.row*line);
                 SetTextColor(dc,ink);TextOutW(dc,rect.left+Px(12)+glyph.column*cell,y+Px(36)+glyph.row*line,&glyph.value,1);
             }
         }
@@ -829,6 +900,7 @@ int RichText(HDC dc,const std::vector<chat::MdRun>& runs,RECT rect,bool paint,CO
             SelectObject(dc,piece.font);SetBkMode(dc,TRANSPARENT);
             SetTextColor(dc,piece.style&chat::MdLink?RGB(110,180,245):piece.style&chat::MdCode?RGB(220,190,160):color);
             TextOutW(dc,left+((piece.style&chat::MdCode)?Px(3):0),top,piece.text.c_str(),static_cast<int>(piece.text.size()));
+            RecordGlyphs(dc,piece.text,left+((piece.style&chat::MdCode)?Px(3):0),top);
             if(!piece.href.empty()&&SafeResponseLink(piece.href))responseLinks.push_back({{left,top,left+piece.width,top+piece.height},piece.href});
         }
         y+=ascent+descent+Px(4);line.clear();x=ascent=descent=0;
@@ -903,8 +975,49 @@ int MessageHeight(HDC dc,const chat::Message& message,int width) {
     DrawTextW(dc,message.text.c_str(),-1,&rect,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);
     return rect.bottom+(user?Px(24):0)+ActivityHeight(dc,message,width);
 }
+void ComposerBackground(HDC dc) {
+    auto rect=layout.composer;int width=rect.right-rect.left,height=rect.bottom-rect.top;
+    if(width<=0||height<=0)return;
+    // Blur a reduced backdrop, then tint it; work stays proportional to the prompt size.
+    int smallWidth=std::max(1,width/4),smallHeight=std::max(1,height/4);
+    BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=smallWidth;
+    info.bmiHeader.biHeight=-smallHeight;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+    void* data=nullptr;auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&data,nullptr,0);
+    auto sample=CreateCompatibleDC(dc);auto previous=SelectObject(sample,bitmap);
+    if(!bitmap||!data||!sample){if(sample){SelectObject(sample,previous);DeleteDC(sample);}if(bitmap)DeleteObject(bitmap);Fill(dc,rect,Surface);return;}
+    SetStretchBltMode(sample,HALFTONE);SetBrushOrgEx(sample,0,0,nullptr);
+    StretchBlt(sample,0,0,smallWidth,smallHeight,dc,rect.left,rect.top,width,height,SRCCOPY);GdiFlush();
+    auto pixels=static_cast<unsigned char*>(data);std::vector<unsigned char> scratch(static_cast<size_t>(smallWidth)*smallHeight*4);
+    for(int pass=0;pass<2;++pass) {
+        for(int y=0;y<smallHeight;++y)for(int x=0;x<smallWidth;++x)for(int channel=0;channel<3;++channel) {
+            int sum=0;
+            for(int delta=-2;delta<=2;++delta) {
+                int sx=pass?x:std::clamp(x+delta,0,smallWidth-1),sy=pass?std::clamp(y+delta,0,smallHeight-1):y;
+                sum+=pixels[(static_cast<size_t>(sy)*smallWidth+sx)*4+channel];
+            }
+            scratch[(static_cast<size_t>(y)*smallWidth+x)*4+channel]=static_cast<unsigned char>(sum/5);
+        }
+        memcpy(pixels,scratch.data(),scratch.size());
+    }
+    for(size_t i=0;i<scratch.size();i+=4)for(int channel=0;channel<3;++channel)
+        pixels[i+channel]=static_cast<unsigned char>((pixels[i+channel]*24+36*76)/100);
+    auto full=CreateCompatibleDC(dc);auto fullBitmap=CreateCompatibleBitmap(dc,width,height);auto old=SelectObject(full,fullBitmap);
+    SetStretchBltMode(full,HALFTONE);SetBrushOrgEx(full,0,0,nullptr);
+    StretchBlt(full,0,0,width,height,sample,0,0,smallWidth,smallHeight,SRCCOPY);
+    auto brush=CreatePatternBrush(fullBitmap);
+    if(brush){if(composerBackdropBrush)DeleteObject(composerBackdropBrush);composerBackdropBrush=brush;}
+    BitBlt(dc,rect.left,rect.top,width,height,full,0,0,SRCCOPY);
+    SelectObject(full,old);DeleteObject(fullBitmap);DeleteDC(full);
+    SelectObject(sample,previous);DeleteObject(bitmap);DeleteDC(sample);
+    RedrawWindow(input,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE);
+    InvalidateRect(sendButton,nullptr,FALSE);InvalidateRect(clearAttachmentsButton,nullptr,FALSE);
+}
+void AlignComposerBrush(HDC dc,HWND control) {
+    RECT rect{};GetWindowRect(control,&rect);MapWindowPoints(nullptr,app,reinterpret_cast<POINT*>(&rect),2);
+    SetBrushOrgEx(dc,layout.composer.left-rect.left,layout.composer.top-rect.top,nullptr);
+}
 void Paint(HDC dc) {
-    responseLinks.clear();
+    responseLinks.clear();textGlyphs.clear();captureText=false;
     auto& r=layout;
     Fill(dc,r.client,Background);
     Text(dc,L"\uf264",{Px(Space),0,Px(Space+24),Px(Header)},navIconFont,Ink,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
@@ -919,15 +1032,24 @@ void Paint(HDC dc) {
         Text(dc,L"Ask a question, describe what you want to create, or drop images and documents.",{r.column.left,top+Px(52),r.column.right,top+Px(104)},bodyFont,Muted);
     }
     int width=r.column.right-r.column.left;
-    int total=0;for(auto& message:messages)total+=MessageHeight(dc,message,width)+Px(Space);
+    std::vector<int> heights;heights.reserve(messages.size());
+    int total=0;for(const auto& message:messages){int height=MessageHeight(dc,message,width);heights.push_back(height);total+=height+Px(Space);}
     if(busy&&!streamingMessage)total+=Px(40);
+    // Leave enough scrollable space to bring the last message above the floating prompt.
+    if(total>0)total+=r.client.bottom-r.composer.top;
     scroll=std::clamp(scroll,0,std::max(0,total-static_cast<int>(r.conversation.bottom-r.conversation.top)));
-    SCROLLINFO info{sizeof(info),SIF_RANGE|SIF_PAGE|SIF_POS,0,std::max(0,total-1),static_cast<UINT>(std::max(1L,r.conversation.bottom-r.conversation.top)),scroll,0};
-    SetScrollInfo(conversationScroll,SB_CTL,&info,TRUE);
+    if(conversationExtent!=total||conversationPage!=std::max(1L,r.conversation.bottom-r.conversation.top)) {
+        conversationExtent=total;conversationPage=std::max(1L,r.conversation.bottom-r.conversation.top);
+    }
+    InvalidateRect(conversationScroll,nullptr,FALSE);
+    UpdateWindow(conversationScroll);
     ShowWindow(conversationScroll,total>r.conversation.bottom-r.conversation.top?SW_SHOW:SW_HIDE);
     int y=r.conversation.top-scroll;
-    for(auto& message:messages) {
-        bool user=message.role==L"user";int height=MessageHeight(dc,message,width);
+    for(size_t index=0;index<messages.size();++index) {
+        const auto& message=messages[index];
+        bool user=message.role==L"user";int height=heights[index];
+        if(!HasTextSelection()&&!dragText&&(y+height<r.conversation.top||y>=r.conversation.bottom)){y+=height+Px(Space);continue;}
+        captureText=true;textMessage=index;textOffset=0;
         int contentHeight=height-ActivityHeight(dc,message,width);
         int left=user?r.column.left+width/4:r.column.left;
         if(user)Round(dc,{left,y,r.column.right,y+contentHeight},Surface,Px(20));
@@ -936,11 +1058,14 @@ void Paint(HDC dc) {
         if(user)Text(dc,message.text,{left+padding,y+topPadding,r.column.right-padding,y+contentHeight},bodyFont,color);
         else ResponseText(dc,message.text,{left,y,r.column.right,y+contentHeight},true,color,message.role==L"assistant"||message.role==L"streaming"||message.role==L"partial");
         if(!message.activity.empty())Text(dc,message.activity,{left+Px(16),y+contentHeight+Px(8),r.column.right-Px(16),y+height},smallFont,Muted);
-        y+=height+Px(Space);
+        captureText=false;y+=height+Px(Space);
+    }
+    for(const auto& glyph:textGlyphs)if(glyph.position>=std::min(textAnchor,textEnd)&&glyph.position<std::max(textAnchor,textEnd)) {
+        auto rect=glyph.rect;PatBlt(dc,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,DSTINVERT);
     }
     if(busy&&!streamingMessage)Text(dc,L"Thinking...",{r.column.left,y,r.column.right,y+Px(28)},bodyFont,Muted);
     RestoreDC(dc,-1);
-    Fill(dc,r.composer,Surface);
+    ComposerBackground(dc);
     if(!pendingAttachments.empty())Text(dc,L"Attached: "+chat::AttachmentNames(pendingAttachments),{r.composer.left+Px(24),r.composer.top+Px(12),r.composer.right-Px(56),r.composer.top+Px(36)},smallFont,Ink,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
     // The composer stays rectangular, with the same 16px inset on all sides.
 }
@@ -954,7 +1079,9 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     bool modal=GetPropW(GetParent(item.hwndItem),L"ModalOriginalProc")!=nullptr;
     COLORREF background=(send||clearAttachments)?Surface:toggle?Background:caption?(modal?ModalHeader:RGB(28,28,28)):Panel;
     if(hover||pressed)background=item.CtlID==12?RGB(196,43,28):(pressed?RGB(62,62,62):RGB(47,47,47));
-    Fill(dc,rect,background);
+    if((send||clearAttachments)&&!hover&&!pressed&&composerBackdropBrush) {
+        AlignComposerBrush(dc,item.hwndItem);FillRect(dc,&rect,composerBackdropBrush);
+    }else Fill(dc,rect,background);
     if(clearAttachments) {
         Text(dc,L"\uf659",rect,captionIconFont,Ink,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
     } else if(send) {
@@ -1070,6 +1197,68 @@ int ShowModalMessage(HWND owner,const wchar_t* text,const wchar_t* title,UINT ty
     return static_cast<int>(DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,owner,ModalMessageProc,reinterpret_cast<LPARAM>(&data)));
 }
 }
+RECT ConversationThumb(HWND window) {
+    RECT rect{};GetClientRect(window,&rect);
+    int height=std::max(0L,rect.bottom),extent=std::max(1,conversationExtent);
+    int thumb=std::min(height,std::max(Px(28),static_cast<int>(static_cast<long long>(height)*conversationPage/extent)));
+    int maximum=std::max(0,conversationExtent-conversationPage);
+    int top=maximum?static_cast<int>(static_cast<long long>(std::clamp(scroll,0,maximum))*(height-thumb)/maximum):0;
+    return {Px(4),top,std::max(Px(4),static_cast<int>(rect.right)-Px(4)),top+thumb};
+}
+void SetConversationScroll(int position) {
+    scroll=std::clamp(position,0,std::max(0,conversationExtent-conversationPage));
+    // Paint the thumb immediately; conversation layout must not delay pointer feedback.
+    InvalidateRect(conversationScroll,nullptr,FALSE);
+    UpdateWindow(conversationScroll);
+    InvalidateRect(app,&layout.conversation,FALSE);
+}
+void PageConversationScroll(HWND window) {
+    POINT point{};GetCursorPos(&point);ScreenToClient(window,&point);auto thumb=ConversationThumb(window);
+    if((scrollRepeatDirection<0&&point.y<thumb.top)||(scrollRepeatDirection>0&&point.y>=thumb.bottom))
+        SetConversationScroll(scroll+scrollRepeatDirection*conversationPage);
+}
+LRESULT CALLBACK ConversationScrollProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    switch(message) {
+    case WM_ERASEBKGND:return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};auto target=BeginPaint(window,&paint);RECT rect{};GetClientRect(window,&rect);
+        if(rect.right>0&&rect.bottom>0) {
+            auto dc=CreateCompatibleDC(target);auto bitmap=CreateCompatibleBitmap(target,rect.right,rect.bottom);auto old=SelectObject(dc,bitmap);
+            Fill(dc,rect,Background);auto thumb=ConversationThumb(window);
+            Round(dc,thumb,scrollDragging?Muted:scrollHovered?RGB(112,112,112):RGB(80,80,80),Px(6));
+            BitBlt(target,0,0,rect.right,rect.bottom,dc,0,0,SRCCOPY);SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
+        }
+        EndPaint(window,&paint);return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        SetFocus(window);SetCapture(window);auto thumb=ConversationThumb(window);int y=GET_Y_LPARAM(lParam);
+        if(y>=thumb.top&&y<thumb.bottom){scrollDragging=true;scrollDragOffset=y-thumb.top;}
+        else {scrollRepeatDirection=y<thumb.top?-1:1;PageConversationScroll(window);SetTimer(window,1,350,nullptr);}
+        InvalidateRect(window,nullptr,FALSE);return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if(!scrollHovered){scrollHovered=true;TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,window,0};TrackMouseEvent(&tracking);InvalidateRect(window,nullptr,FALSE);}
+        if(scrollDragging) {
+            RECT rect{};GetClientRect(window,&rect);auto thumb=ConversationThumb(window);
+            int travel=rect.bottom-(thumb.bottom-thumb.top),maximum=std::max(0,conversationExtent-conversationPage);
+            if(travel>0)SetConversationScroll(static_cast<int>(static_cast<long long>(std::clamp(GET_Y_LPARAM(lParam)-scrollDragOffset,0,travel))*maximum/travel));
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:scrollHovered=false;InvalidateRect(window,nullptr,FALSE);return 0;
+    case WM_LBUTTONUP:if(GetCapture()==window)ReleaseCapture();return 0;
+    case WM_CAPTURECHANGED:scrollDragging=false;scrollRepeatDirection=0;KillTimer(window,1);InvalidateRect(window,nullptr,FALSE);return 0;
+    case WM_TIMER:if(wParam==1){PageConversationScroll(window);SetTimer(window,1,60,nullptr);return 0;}break;
+    case WM_MOUSEWHEEL:SetConversationScroll(scroll-GET_WHEEL_DELTA_WPARAM(wParam)/WHEEL_DELTA*Px(64));return 0;
+    case WM_KEYDOWN:
+        switch(wParam) {
+        case VK_UP:SetConversationScroll(scroll-Px(32));return 0;case VK_DOWN:SetConversationScroll(scroll+Px(32));return 0;
+        case VK_PRIOR:SetConversationScroll(scroll-conversationPage);return 0;case VK_NEXT:SetConversationScroll(scroll+conversationPage);return 0;
+        case VK_HOME:SetConversationScroll(0);return 0;case VK_END:SetConversationScroll(conversationExtent);return 0;
+        }break;
+    }
+    return DefWindowProcW(window,message,wParam,lParam);
+}
 LRESULT CALLBACK TranscriptProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     auto edit=GetDlgItem(window,1);
     if(message==WM_CREATE) {
@@ -1127,7 +1316,9 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         surfaceBrush=CreateSolidBrush(Surface);CreateFonts();
         auto button=[&](const wchar_t* name,int id){HWND control=CreateWindowW(L"BUTTON",name,WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_CLIPSIBLINGS|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);auto original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc)));if(!oldButtonProc)oldButtonProc=original;return control;};
         newButton=button(L"New chat",1);settingsButton=button(L"Settings",2);sidebarToggle=button(L"Collapse sidebar",4);sendButton=button(L"Send message",5);minButton=button(L"Minimize",10);maxButton=button(L"Restore",11);closeButton=button(L"Close",12);
-        conversationScroll=CreateWindowW(L"SCROLLBAR",L"",WS_CHILD|SBS_VERT,0,0,0,0,window,reinterpret_cast<HMENU>(13),instance,nullptr);
+        WNDCLASSW scrollClass{};scrollClass.lpfnWndProc=ConversationScrollProc;scrollClass.hInstance=instance;
+        scrollClass.lpszClassName=L"ChatDarkScroll";scrollClass.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&scrollClass);
+        conversationScroll=CreateWindowW(scrollClass.lpszClassName,L"Conversation scrollbar",WS_CHILD|WS_TABSTOP,0,0,0,0,window,reinterpret_cast<HMENU>(13),instance,nullptr);
         historyList=CreateWindowW(L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS|LBS_NOINTEGRALHEIGHT,0,0,0,0,window,reinterpret_cast<HMENU>(7),instance,nullptr);
         SetWindowSubclass(historyList,HistoryListProc,1,0);
         SendMessageW(historyList,LB_SETITEMHEIGHT,0,Px(36));
@@ -1171,7 +1362,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(LOWORD(wParam)==6&&HIWORD(wParam)==BN_CLICKED){pendingAttachments.clear();Layout();SetFocus(input);return 0;}
         if(LOWORD(wParam)==4){sidebarExpanded=!sidebarExpanded;Layout();return 0;}
         if(HIWORD(wParam)==BN_CLICKED){switch(LOWORD(wParam)){case 1:Reset();break;case 2:OpenSettings();break;case 5:if(busy)StopAgent();else Send();break;case 10:ShowWindow(window,SW_MINIMIZE);break;case 11:ShowWindow(window,IsZoomed(window)?SW_RESTORE:SW_MAXIMIZE);break;case 12:PostMessageW(window,WM_CLOSE,0,0);break;}}
-        if(HIWORD(wParam)==EN_CHANGE&&LOWORD(wParam)==3){if(!recallingPrompt){recalledPrompt.reset();promptRecallDraft.clear();}Layout(true);if(!restoringChat)SetTimer(window,9,700,nullptr);}
+        if(HIWORD(wParam)==EN_CHANGE&&LOWORD(wParam)==3){RedrawWindow(input,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE);if(!recallingPrompt){recalledPrompt.reset();promptRecallDraft.clear();}Layout(true);if(!restoringChat)SetTimer(window,9,700,nullptr);}
         return 0;
     case WM_NOTIFY: {
         auto notification=reinterpret_cast<NMHDR*>(lParam);
@@ -1236,39 +1427,59 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         scroll=1000000;InvalidateRect(window,nullptr,FALSE);return 0;
     }
     case WM_APP+2:if(!historyError.empty()){auto error=std::move(historyError);historyError.clear();ShowModalMessage(window,error.c_str(),L"Chat history",MB_OK|MB_ICONERROR);}return 0;
-    case WM_TIMER:if(wParam==9){KillTimer(window,9);PersistChat();return 0;}break;
-    case WM_VSCROLL: {
-        if(reinterpret_cast<HWND>(lParam)!=conversationScroll)break;
-        SCROLLINFO info{sizeof(info),SIF_ALL};GetScrollInfo(conversationScroll,SB_CTL,&info);
-        switch(LOWORD(wParam)) {
-        case SB_LINEUP:scroll-=Px(32);break;case SB_LINEDOWN:scroll+=Px(32);break;
-        case SB_PAGEUP:scroll-=static_cast<int>(info.nPage);break;case SB_PAGEDOWN:scroll+=static_cast<int>(info.nPage);break;
-        case SB_THUMBTRACK:case SB_THUMBPOSITION:scroll=info.nTrackPos;break;
-        case SB_TOP:scroll=0;break;case SB_BOTTOM:scroll=info.nMax;break;
-        }
-        InvalidateRect(window,nullptr,FALSE);return 0;
-    }
-    case WM_CONTEXTMENU: {
-        POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};auto client=point;ScreenToClient(window,&client);
-        if(PtInRect(&layout.conversation,client)) {
-            auto menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Select/copy chat text...");
-            auto choice=TrackPopupMenu(menu,TPM_RETURNCMD,point.x,point.y,0,window,nullptr);DestroyMenu(menu);
-            if(choice==1)OpenTranscript();return 0;
+    case WM_TIMER:
+        if(wParam==9){KillTimer(window,9);PersistChat();return 0;}
+        if(wParam==10&&dragText) {
+            POINT point{};GetCursorPos(&point);ScreenToClient(window,&point);
+            if(point.y<layout.conversation.top+Px(16)||point.y>layout.composer.top-Px(16)) {
+                SetConversationScroll(scroll+(point.y<layout.conversation.top+Px(16)?-Px(24):Px(24)));
+                UpdateWindow(window);point.y=std::clamp<LONG>(point.y,layout.conversation.top,layout.composer.top-1);
+                textEnd=HitChatText(point);InvalidateRect(window,&layout.conversation,FALSE);
+            }
+            return 0;
+        }break;
+    case WM_KEYDOWN:
+        if(wParam=='C'&&(GetKeyState(VK_CONTROL)&0x8000)){UpdateWindow(window);CopyChatSelection();return 0;}
+        if(wParam=='A'&&(GetKeyState(VK_CONTROL)&0x8000)){textAnchor={0,0};textEnd={messages.size(),0};InvalidateRect(window,&layout.conversation,FALSE);return 0;}
+        if(wParam==VK_ESCAPE){textAnchor=textEnd={};InvalidateRect(window,&layout.conversation,FALSE);return 0;}
+        break;
+    case WM_LBUTTONDOWN: {
+        POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+        if(PtInRect(&layout.conversation,point)&&!PtInRect(&layout.composer,point)) {
+            SetFocus(window);textAnchor=textEnd=HitChatText(point);dragText=true;SetCapture(window);SetTimer(window,10,40,nullptr);
+            InvalidateRect(window,&layout.conversation,FALSE);return 0;
         }break;
     }
-    case WM_MOUSEWHEEL:scroll-=GET_WHEEL_DELTA_WPARAM(wParam)/WHEEL_DELTA*Px(64);InvalidateRect(window,nullptr,FALSE);return 0;
+    case WM_MOUSEMOVE:
+        if(dragText){textEnd=HitChatText({GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)});InvalidateRect(window,&layout.conversation,FALSE);return 0;}break;
+    case WM_CAPTURECHANGED:dragText=false;KillTimer(window,10);break;
+    case WM_CONTEXTMENU: {
+        POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};auto client=point;ScreenToClient(window,&client);
+        if(PtInRect(&layout.conversation,client)&&!PtInRect(&layout.composer,client)) {
+            UpdateWindow(window);auto menu=CreatePopupMenu();if(HasTextSelection())AppendMenuW(menu,MF_STRING,2,L"Copy\tCtrl+C");AppendMenuW(menu,MF_STRING,1,L"Select/copy chat text...");
+            auto choice=TrackPopupMenu(menu,TPM_RETURNCMD,point.x,point.y,0,window,nullptr);DestroyMenu(menu);
+            if(choice==1)OpenTranscript();else if(choice==2)CopyChatSelection();return 0;
+        }break;
+    }
+    case WM_MOUSEWHEEL:SetConversationScroll(scroll-GET_WHEEL_DELTA_WPARAM(wParam)/WHEEL_DELTA*Px(64));return 0;
     case WM_LBUTTONUP: {
+        if(dragText){textEnd=HitChatText({GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)});dragText=false;ReleaseCapture();InvalidateRect(window,&layout.conversation,FALSE);if(HasTextSelection())return 0;}
         POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
-        if(PtInRect(&layout.conversation,point))for(const auto& link:responseLinks)if(PtInRect(&link.rect,point)){ShellExecuteW(window,L"open",link.href.c_str(),nullptr,nullptr,SW_SHOWNORMAL);return 0;}
+        if(PtInRect(&layout.conversation,point)&&!PtInRect(&layout.composer,point))for(const auto& link:responseLinks)if(PtInRect(&link.rect,point)){ShellExecuteW(window,L"open",link.href.c_str(),nullptr,nullptr,SW_SHOWNORMAL);return 0;}
         break;
     }
     case WM_SETCURSOR: {
         POINT point{};GetCursorPos(&point);ScreenToClient(window,&point);
-        if(LOWORD(lParam)==HTCLIENT&&PtInRect(&layout.conversation,point))for(const auto& link:responseLinks)if(PtInRect(&link.rect,point)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
+        if(LOWORD(lParam)==HTCLIENT&&PtInRect(&layout.conversation,point)&&!PtInRect(&layout.composer,point))for(const auto& link:responseLinks)if(PtInRect(&link.rect,point)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
+        if(LOWORD(lParam)==HTCLIENT&&PtInRect(&layout.conversation,point)&&!PtInRect(&layout.composer,point)){SetCursor(LoadCursorW(nullptr,IDC_IBEAM));return TRUE;}
         break;
     }
     case WM_CTLCOLORLISTBOX:SetTextColor(reinterpret_cast<HDC>(wParam),Ink);SetBkColor(reinterpret_cast<HDC>(wParam),Background);SetDCBrushColor(reinterpret_cast<HDC>(wParam),Background);return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
-    case WM_CTLCOLOREDIT:SetTextColor(reinterpret_cast<HDC>(wParam),Ink);SetBkColor(reinterpret_cast<HDC>(wParam),Surface);return reinterpret_cast<LRESULT>(surfaceBrush);
+    case WM_CTLCOLOREDIT: {
+        auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Surface);
+        if(reinterpret_cast<HWND>(lParam)==input&&composerBackdropBrush){SetBkMode(dc,TRANSPARENT);AlignComposerBrush(dc,input);return reinterpret_cast<LRESULT>(composerBackdropBrush);}
+        return reinterpret_cast<LRESULT>(surfaceBrush);
+    }
     case WM_DRAWITEM: {
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         if(wParam==7){
@@ -1308,6 +1519,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         for(auto font:{bodyFont,labelFont,headingFont,smallFont,codeFont,navIconFont,captionIconFont})if(font)DeleteObject(font);
         for(const auto& font:markdownFonts)DeleteObject(font.second);markdownFonts.clear();
         if(iconFontResource)RemoveFontMemResourceEx(iconFontResource);
+        if(composerBackdropBrush)DeleteObject(composerBackdropBrush);
         DeleteObject(surfaceBrush);PostQuitMessage(0);return 0;
     }
     return DefWindowProcW(window,message,wParam,lParam);
