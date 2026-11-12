@@ -6,13 +6,13 @@ $fonts.AddFontFile((Join-Path $root 'third_party/bootstrap-icons/bootstrap-icons
 $images = @()
 try {
     foreach ($size in @(16, 20, 24, 32, 48, 64, 128, 256)) {
-        $bitmap = New-Object System.Drawing.Bitmap($size, $size)
+        $bitmap = [System.Drawing.Bitmap]::new($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $font = New-Object System.Drawing.Font($fonts.Families[0], ($size * 0.72), [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
         $format = New-Object System.Drawing.StringFormat
         $stream = New-Object System.IO.MemoryStream
         try {
-            $graphics.Clear([System.Drawing.Color]::FromArgb(28, 28, 28))
+            $graphics.Clear([System.Drawing.Color]::Transparent)
             $graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
             $format.Alignment = [System.Drawing.StringAlignment]::Center
             $format.LineAlignment = [System.Drawing.StringAlignment]::Center

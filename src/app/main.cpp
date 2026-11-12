@@ -22,6 +22,7 @@
 #include "tools/mcp_client.h"
 #include "tools/computer_tool.h"
 #include "config/chat_history.h"
+#include "config/window_state.h"
 
 namespace {
 constexpr COLORREF Background=RGB(24,24,24), Panel=RGB(31,31,31), Surface=RGB(36,36,36);
@@ -156,10 +157,16 @@ void Layout(bool promptOnly=false) {
     RedrawWindow(input,nullptr,nullptr,RDW_INVALIDATE|RDW_NOERASE);
     if(!promptOnly) {
     int size=Px(Header);
-    MoveWindow(minButton,width-size*3,0,size,size,TRUE);
-    MoveWindow(maxButton,width-size*2,0,size,size,TRUE);
-    MoveWindow(closeButton,width-size,0,size,size,TRUE);
-    SetWindowTextW(maxButton,IsZoomed(app)?L"Restore":L"Maximize");
+    auto positions=BeginDeferWindowPos(3);
+    for(auto control:{minButton,maxButton,closeButton}) {
+        int offset=control==minButton?3:control==maxButton?2:1;
+        if(positions)positions=DeferWindowPos(positions,control,nullptr,width-size*offset,0,size,size,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);
+    }
+    if(positions)EndDeferWindowPos(positions);
+    else for(auto control:{minButton,maxButton,closeButton}){int offset=control==minButton?3:control==maxButton?2:1;SetWindowPos(control,nullptr,width-size*offset,0,size,size,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);}
+    const wchar_t* caption=IsZoomed(app)?L"Restore":L"Maximize";wchar_t previousCaption[32]{};GetWindowTextW(maxButton,previousCaption,32);
+    if(std::wstring(previousCaption)!=caption)SetWindowTextW(maxButton,caption);
+    for(auto control:{minButton,maxButton,closeButton})RedrawWindow(control,nullptr,nullptr,RDW_INVALIDATE|RDW_NOERASE|RDW_UPDATENOW);
     }
     InvalidateRect(app,nullptr,FALSE);
 }
@@ -697,6 +704,7 @@ LRESULT CALLBACK InputProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam)
     return result;
 }
 LRESULT CALLBACK ButtonProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    if(message==WM_ERASEBKGND)return 1;
     if(message==WM_MOUSEMOVE){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,window,0};TrackMouseEvent(&tracking);InvalidateRect(window,nullptr,FALSE);}
     if(message==WM_MOUSELEAVE)InvalidateRect(window,nullptr,FALSE);
     return CallWindowProcW(oldButtonProc,window,message,wParam,lParam);
@@ -1034,7 +1042,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(loaded)iconFontResource=AddFontMemResourceEx(LockResource(loaded),SizeofResource(instance,resource),nullptr,&fonts);
         if(!iconFontResource)return -1;
         surfaceBrush=CreateSolidBrush(Surface);CreateFonts();
-        auto button=[&](const wchar_t* name,int id){HWND control=CreateWindowW(L"BUTTON",name,WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);auto original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc)));if(!oldButtonProc)oldButtonProc=original;return control;};
+        auto button=[&](const wchar_t* name,int id){HWND control=CreateWindowW(L"BUTTON",name,WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_CLIPSIBLINGS|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);auto original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc)));if(!oldButtonProc)oldButtonProc=original;return control;};
         newButton=button(L"New chat",1);settingsButton=button(L"Settings",2);sidebarToggle=button(L"Collapse sidebar",4);sendButton=button(L"Send message",5);minButton=button(L"Minimize",10);maxButton=button(L"Restore",11);closeButton=button(L"Close",12);
         historyList=CreateWindowW(L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS|LBS_NOINTEGRALHEIGHT,0,0,0,0,window,reinterpret_cast<HMENU>(7),instance,nullptr);
         SetWindowSubclass(historyList,HistoryListProc,1,0);
@@ -1186,6 +1194,10 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         if(rect.right>0&&rect.bottom>0){HDC buffer=CreateCompatibleDC(dc);HBITMAP bitmap=CreateCompatibleBitmap(dc,rect.right,rect.bottom);auto old=SelectObject(buffer,bitmap);Paint(buffer);BitBlt(dc,0,0,rect.right,rect.bottom,buffer,0,0,SRCCOPY);SelectObject(buffer,old);DeleteObject(bitmap);DeleteDC(buffer);}EndPaint(window,&paint);return 0;
     }
     case WM_ERASEBKGND:return 1;
+    case WM_CLOSE:
+        try{chat::SaveWindowState(configDirectory,window);}catch(const std::exception& error){ShowModalMessage(window,chat::Wide(error.what()).c_str(),L"Window position",MB_OK|MB_ICONERROR);}
+        break;
+    case WM_QUERYENDSESSION:try{chat::SaveWindowState(configDirectory,window);}catch(...){}return TRUE;
     case WM_DESTROY:
         KillTimer(window,9);if(busy)StopAgent();else PersistChat();
         if(worker){worker->Stop();worker.reset();}
@@ -1203,11 +1215,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
     if(!std::filesystem::exists(configDirectory/L"provider-settings.json")&&!std::filesystem::exists(configDirectory/L".env")&&(std::filesystem::exists(configDirectory.parent_path()/L".env")||std::filesystem::exists(configDirectory.parent_path()/L"provider-settings.json")))configDirectory=configDirectory.parent_path();
     WNDCLASSW windowClass{};windowClass.lpfnWndProc=WindowProc;windowClass.hInstance=instance;windowClass.lpszClassName=L"ChatHarness";windowClass.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     windowClass.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));RegisterClassW(&windowClass);
-    HWND window=CreateWindowW(windowClass.lpszClassName,L"",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1120,820,nullptr,nullptr,instance,nullptr);
+    auto savedWindow=chat::LoadWindowState(configDirectory);
+    RECT bounds=savedWindow?savedWindow->normal:RECT{CW_USEDEFAULT,CW_USEDEFAULT,0,0};
+    HWND window=CreateWindowW(windowClass.lpszClassName,L"",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,bounds.left,bounds.top,savedWindow?bounds.right-bounds.left:1120,savedWindow?bounds.bottom-bounds.top:820,nullptr,nullptr,instance,nullptr);
     if(!window)return 1;
     auto smallIcon=LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED);
     SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(smallIcon));
-    ShowWindow(window,SW_SHOWMAXIMIZED);SetFocus(input);
+    if(savedWindow){auto rect=chat::VisibleWindowRect(savedWindow->normal,GetDpiForWindow(window));SetWindowPos(window,nullptr,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,SWP_NOZORDER|SWP_NOACTIVATE);}
+    ShowWindow(window,!savedWindow||savedWindow->maximized?SW_SHOWMAXIMIZED:SW_SHOWNORMAL);SetFocus(input);
     ACCEL toggle{FVIRTKEY|FCONTROL,'B',4};auto shortcuts=CreateAcceleratorTableW(&toggle,1);
     MSG message;BOOL status;while((status=GetMessageW(&message,nullptr,0,0))>0){if(!TranslateAcceleratorW(window,shortcuts,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
     if(shortcuts)DestroyAcceleratorTable(shortcuts);return status==-1?1:0;

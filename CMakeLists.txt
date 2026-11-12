@@ -21,7 +21,7 @@ add_library(harness_core STATIC
     src/client/stream_decoder.cpp src/client/stream_decoder.h
     src/client/call_metrics.h
     src/common/attachments.h src/common/text_encoding.h src/common/tool_format.h
-    src/config/config.cpp src/config/config.h src/config/chat_history.h
+    src/config/config.cpp src/config/config.h src/config/chat_history.h src/config/window_state.h
     src/tools/computer_tool.cpp src/tools/computer_tool.h
     src/tools/mcp_client.cpp src/tools/mcp_client.h
     src/tools/powershell_tool.cpp src/tools/powershell_tool.h

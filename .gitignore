@@ -13,3 +13,6 @@ mcp-servers.json.tmp
 chat-history.json
 chat-history.json.tmp
 .workspace/
+
+window-state.json
+window-state.json.tmp

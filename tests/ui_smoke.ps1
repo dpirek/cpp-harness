@@ -1,6 +1,7 @@
 param([switch]$KeepOpen,[string]$Executable='build\chat.exe',[int]$ModelServerPort=0,[switch]$SkipComputerAccess)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -93,6 +94,7 @@ if($ModelServerPort){
  Set-Content -LiteralPath (Join-Path $isolated '.env') -Value ''
  Remove-Item -LiteralPath (Join-Path $isolated 'provider-settings.json') -ErrorAction SilentlyContinue
  Remove-Item -LiteralPath (Join-Path $isolated 'chat-history.json') -ErrorAction SilentlyContinue
+ Remove-Item -LiteralPath (Join-Path $isolated 'window-state.json') -ErrorAction SilentlyContinue
  $Executable=Join-Path $isolated 'chat.exe'
 }
 $process=Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
@@ -419,6 +421,7 @@ try {
   if($restoredDraft.ToString() -ne 'Keep this draft'){throw 'Restart must restore the active chat draft.'}
   $restoredHistory=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
   if($restoredHistory.active_chat_id -ne $previousId){throw 'Restart must restore the active chat.'}
+  if(![UiCheck]::IsZoomed($window)){throw 'Restart must restore maximized state.'}
   $send=[UiCheck]::GetDlgItem($window,5)
   $null=[UiCheck]::SendMessage($send,0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
   $historyList=[UiCheck]::GetDlgItem($window,7)
@@ -431,6 +434,27 @@ try {
   DeleteHistoryRow 0
   $empty=Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
   if(@($empty.chats).Count -ne 1 -or $empty.active_chat_id -eq $lastId -or @($empty.chats[0].messages).Count -ne 0){throw 'Deleting the last chat must open a fresh empty conversation.'}
+ }
+ if($ModelServerPort){
+  $null=[UiCheck]::ShowWindow($window,9)
+  $work=[Windows.Forms.Screen]::FromHandle($window).WorkingArea
+  $scale=[UiCheck]::GetDpiForWindow($window)/96
+  $targetWidth=[Math]::Min($work.Width,[int](760*$scale));$targetHeight=[Math]::Min($work.Height,[int](580*$scale))
+  $targetX=$work.Left+[Math]::Min(80,$work.Width-$targetWidth);$targetY=$work.Top+[Math]::Min(60,$work.Height-$targetHeight)
+  foreach($offset in @(0,60,20,80,0)){$null=[UiCheck]::SetWindowPos($window,[IntPtr]::Zero,$targetX,$targetY,$targetWidth-$offset,$targetHeight,0x14)}
+  $expectedBounds=New-Object UiCheck+Rect;$null=[UiCheck]::GetWindowRect($window,[ref]$expectedBounds)
+  SaveWindowPreview $window 'resized-header-preview.png'
+  foreach($state in @('normal','minimized')) {
+   if($state -eq 'minimized'){$null=[UiCheck]::ShowWindow($window,6)}
+   $null=[UiCheck]::SendMessage([UiCheck]::GetDlgItem($window,12),0xf5,[IntPtr]::Zero,[IntPtr]::Zero)
+   if(!$process.WaitForExit(5000)){throw 'Window placement test could not close app.'}
+   if(!(Test-Path -LiteralPath (Join-Path $isolated 'window-state.json'))){throw 'Window placement was not saved.'}
+   $process=Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
+   $null=$process.WaitForInputIdle(5000);$window=[UiCheck]::Find($process.Id)
+   if($window -eq [IntPtr]::Zero -or [UiCheck]::IsZoomed($window) -or [UiCheck]::IsIconic($window)){throw 'Normal/minimized close must restore a normal visible window.'}
+   $actualBounds=New-Object UiCheck+Rect;$null=[UiCheck]::GetWindowRect($window,[ref]$actualBounds)
+   if($actualBounds.Left -ne $expectedBounds.Left -or $actualBounds.Top -ne $expectedBounds.Top -or $actualBounds.Right -ne $expectedBounds.Right -or $actualBounds.Bottom -ne $expectedBounds.Bottom){throw 'Window position and size were not restored.'}
+  }
  }
  Write-Output 'UI passed: settings, chat history restoration, per-chat workspaces, prompt layout, and window controls.'
 } finally {
