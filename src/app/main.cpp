@@ -29,7 +29,7 @@ constexpr COLORREF Background=RGB(24,24,24), Panel=RGB(31,31,31), Surface=RGB(36
 constexpr COLORREF ModalHeader=RGB(44,44,44);
 constexpr COLORREF Ink=RGB(240,240,240), Muted=RGB(148,148,148), Border=RGB(48,48,48);
 constexpr int Header=48, Space=24, MaxPromptLines=6;
-HWND historyList,workspaceButton,historyButton;
+HWND conversationScroll,historyList,workspaceButton,historyButton;
 HWND app,input,newButton,settingsButton,sidebarToggle,sendButton,clearAttachmentsButton,navTooltips,minButton,maxButton,closeButton;
 HFONT bodyFont,labelFont,headingFont,smallFont,codeFont,navIconFont,captionIconFont;
 HANDLE iconFontResource=nullptr;
@@ -149,6 +149,7 @@ void Layout(bool promptOnly=false) {
     MoveWindow(sidebarToggle,iconLeft,Px(Header+16),Px(40),Px(40),TRUE);
     SetWindowTextW(sidebarToggle,sidebarWide?L"Collapse sidebar":L"Expand sidebar");
     }
+    MoveWindow(conversationScroll,layout.client.right-Px(18),layout.conversation.top,Px(16),std::max(1L,layout.conversation.bottom-layout.conversation.top),TRUE);
     int inputTop=layout.composer.top+attachmentHeight+(bodyHeight-inputHeight)/2;
     SetWindowPos(input,nullptr,left+Px(24),inputTop,inputWidth,inputHeight,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW);
     MoveWindow(clearAttachmentsButton,layout.composer.right-Px(48),layout.composer.top+Px(8),Px(32),Px(32),TRUE);
@@ -921,6 +922,9 @@ void Paint(HDC dc) {
     int total=0;for(auto& message:messages)total+=MessageHeight(dc,message,width)+Px(Space);
     if(busy&&!streamingMessage)total+=Px(40);
     scroll=std::clamp(scroll,0,std::max(0,total-static_cast<int>(r.conversation.bottom-r.conversation.top)));
+    SCROLLINFO info{sizeof(info),SIF_RANGE|SIF_PAGE|SIF_POS,0,std::max(0,total-1),static_cast<UINT>(std::max(1L,r.conversation.bottom-r.conversation.top)),scroll,0};
+    SetScrollInfo(conversationScroll,SB_CTL,&info,TRUE);
+    ShowWindow(conversationScroll,total>r.conversation.bottom-r.conversation.top?SW_SHOW:SW_HIDE);
     int y=r.conversation.top-scroll;
     for(auto& message:messages) {
         bool user=message.role==L"user";int height=MessageHeight(dc,message,width);
@@ -1066,6 +1070,35 @@ int ShowModalMessage(HWND owner,const wchar_t* text,const wchar_t* title,UINT ty
     return static_cast<int>(DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,owner,ModalMessageProc,reinterpret_cast<LPARAM>(&data)));
 }
 }
+LRESULT CALLBACK TranscriptProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    auto edit=GetDlgItem(window,1);
+    if(message==WM_CREATE) {
+        edit=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|ES_NOHIDESEL,0,0,0,0,window,reinterpret_cast<HMENU>(1),GetModuleHandleW(nullptr),nullptr);
+        SetWindowSubclass(edit,[](HWND control,UINT msg,WPARAM key,LPARAM data,UINT_PTR,DWORD_PTR)->LRESULT {
+            if(msg==WM_KEYDOWN&&key=='A'&&(GetKeyState(VK_CONTROL)&0x8000)){SendMessageW(control,EM_SETSEL,0,-1);return 0;}
+            return DefSubclassProc(control,msg,key,data);
+        },1,0);
+        SendMessageW(edit,EM_SETLIMITTEXT,0x7ffffffe,0);
+        SendMessageW(edit,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);
+        std::wstring text;
+        for(const auto& item:messages) {
+            text+=item.role+L"\r\n";
+            for(wchar_t c:item.text){if(c==L'\n'&&(text.empty()||text.back()!=L'\r'))text+=L'\r';text+=c;}
+            if(!item.activity.empty())text+=L"\r\n"+item.activity;
+            text+=L"\r\n\r\n";
+        }
+        SetWindowTextW(edit,text.c_str());return 0;
+    }
+    if(message==WM_SIZE){MoveWindow(edit,0,0,LOWORD(lParam),HIWORD(lParam),TRUE);return 0;}
+    if(message==WM_SETFOCUS){SetFocus(edit);return 0;}
+    if(message==WM_COMMAND&&LOWORD(wParam)==2){SendMessageW(edit,EM_SETSEL,0,-1);return 0;}
+    return DefWindowProcW(window,message,wParam,lParam);
+}
+void OpenTranscript() {
+    WNDCLASSW cls{};cls.lpfnWndProc=TranscriptProc;cls.hInstance=GetModuleHandleW(nullptr);cls.lpszClassName=L"ChatSelectableTranscript";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);RegisterClassW(&cls);
+    auto window=CreateWindowExW(0,cls.lpszClassName,L"Chat history ? select text and press Ctrl+C",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,Px(800),Px(600),app,nullptr,cls.hInstance,nullptr);
+    auto menu=CreateMenu();AppendMenuW(menu,MF_STRING,2,L"Select all");SetMenu(window,menu);SetFocus(window);
+}
 LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     switch(message) {
     case WM_NCCALCSIZE:
@@ -1094,6 +1127,7 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
         surfaceBrush=CreateSolidBrush(Surface);CreateFonts();
         auto button=[&](const wchar_t* name,int id){HWND control=CreateWindowW(L"BUTTON",name,WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_CLIPSIBLINGS|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);auto original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc)));if(!oldButtonProc)oldButtonProc=original;return control;};
         newButton=button(L"New chat",1);settingsButton=button(L"Settings",2);sidebarToggle=button(L"Collapse sidebar",4);sendButton=button(L"Send message",5);minButton=button(L"Minimize",10);maxButton=button(L"Restore",11);closeButton=button(L"Close",12);
+        conversationScroll=CreateWindowW(L"SCROLLBAR",L"",WS_CHILD|SBS_VERT,0,0,0,0,window,reinterpret_cast<HMENU>(13),instance,nullptr);
         historyList=CreateWindowW(L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS|LBS_NOINTEGRALHEIGHT,0,0,0,0,window,reinterpret_cast<HMENU>(7),instance,nullptr);
         SetWindowSubclass(historyList,HistoryListProc,1,0);
         SendMessageW(historyList,LB_SETITEMHEIGHT,0,Px(36));
@@ -1203,6 +1237,25 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam
     }
     case WM_APP+2:if(!historyError.empty()){auto error=std::move(historyError);historyError.clear();ShowModalMessage(window,error.c_str(),L"Chat history",MB_OK|MB_ICONERROR);}return 0;
     case WM_TIMER:if(wParam==9){KillTimer(window,9);PersistChat();return 0;}break;
+    case WM_VSCROLL: {
+        if(reinterpret_cast<HWND>(lParam)!=conversationScroll)break;
+        SCROLLINFO info{sizeof(info),SIF_ALL};GetScrollInfo(conversationScroll,SB_CTL,&info);
+        switch(LOWORD(wParam)) {
+        case SB_LINEUP:scroll-=Px(32);break;case SB_LINEDOWN:scroll+=Px(32);break;
+        case SB_PAGEUP:scroll-=static_cast<int>(info.nPage);break;case SB_PAGEDOWN:scroll+=static_cast<int>(info.nPage);break;
+        case SB_THUMBTRACK:case SB_THUMBPOSITION:scroll=info.nTrackPos;break;
+        case SB_TOP:scroll=0;break;case SB_BOTTOM:scroll=info.nMax;break;
+        }
+        InvalidateRect(window,nullptr,FALSE);return 0;
+    }
+    case WM_CONTEXTMENU: {
+        POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};auto client=point;ScreenToClient(window,&client);
+        if(PtInRect(&layout.conversation,client)) {
+            auto menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Select/copy chat text...");
+            auto choice=TrackPopupMenu(menu,TPM_RETURNCMD,point.x,point.y,0,window,nullptr);DestroyMenu(menu);
+            if(choice==1)OpenTranscript();return 0;
+        }break;
+    }
     case WM_MOUSEWHEEL:scroll-=GET_WHEEL_DELTA_WPARAM(wParam)/WHEEL_DELTA*Px(64);InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_LBUTTONUP: {
         POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
