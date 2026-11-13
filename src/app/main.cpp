@@ -28,7 +28,7 @@
 
 namespace {
 constexpr COLORREF Background=RGB(24,24,24), Panel=RGB(31,31,31), Surface=RGB(36,36,36);
-constexpr COLORREF ModalHeader=RGB(44,44,44);
+constexpr COLORREF ModalHeader=RGB(44,44,44), ModalBody=RGB(40,40,40);
 constexpr COLORREF Ink=RGB(240,240,240), Muted=RGB(148,148,148), Border=RGB(48,48,48);
 constexpr int Header=48, Space=24, MaxPromptLines=6;
 HWND conversationScroll,historyList,workspaceButton,historyButton;
@@ -476,7 +476,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
             SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);return child;
         };
         control(L"STATIC",L"Chat completions URL",0,0,24,20,400,24);
-        control(L"BUTTON",L"Provider type...",WS_TABSTOP,115,440,14,176,28);
+        control(L"BUTTON",L"Provider type",WS_TABSTOP,115,440,14,176,28);
         control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL,101,24,48,592,30);
         control(L"STATIC",L"API key (optional for local endpoints)",0,0,24,92,592,24);
         auto key=control(L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD,102,24,120,400,30);
@@ -492,7 +492,7 @@ INT_PTR CALLBACK ProviderSettingsProc(HWND window,UINT message,WPARAM wParam,LPA
         control(L"STATIC",L"Token limit field",0,0,440,236,176,24);
         auto tokenField=control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,113,440,264,176,180);
         for(auto name:{L"max_tokens",L"max_completion_tokens",L"none"})SendMessageW(tokenField,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
-        control(L"BUTTON",L"Request token usage in stream (disable if unsupported)",WS_TABSTOP|BS_AUTOCHECKBOX,114,24,422,592,20);
+        control(L"BUTTON",L"Request token usage in stream (disable if unsupported)",WS_TABSTOP|BS_AUTOCHECKBOX,114,24,422,592,32);
         control(L"EDIT",L"Enter a provider URL to load available models.",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,104,24,306,456,52);
         auto details=control(L"BUTTON",L"Error details",WS_TABSTOP,116,496,306,120,30);EnableWindow(details,FALSE);
         control(L"STATIC",L"Max model turns (1-100)",0,0,24,360,280,24);
@@ -702,13 +702,48 @@ INT_PTR CALLBACK SystemPromptSettingsProc(HWND window,UINT message,WPARAM wParam
     return FALSE;
 }
 void DrawButton(const DRAWITEMSTRUCT& item);
+// Keep native scrollbar input and accessibility, and paint its nonclient area
+// with the same charcoal track and muted thumb used throughout the app.
+LRESULT CALLBACK SettingsScrollProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    auto result=DefSubclassProc(window,message,wParam,lParam);
+    if(message==WM_NCPAINT||message==WM_PAINT||message==WM_SIZE||message==WM_VSCROLL||message==WM_HSCROLL||message==WM_MOUSEWHEEL||message==WM_MOUSEHWHEEL||message==WM_NCMOUSEMOVE||message==WM_NCMOUSELEAVE||message==WM_NCLBUTTONDOWN||message==WM_LBUTTONUP||message==WM_MOUSEMOVE||message==WM_TIMER||message==WM_KEYUP||message==WM_SETTEXT) {
+        auto dc=GetWindowDC(window);
+        if(dc) {
+            RECT bounds{};GetWindowRect(window,&bounds);
+            for(auto object:{OBJID_VSCROLL,OBJID_HSCROLL}) {
+                SCROLLBARINFO info{sizeof(info)};
+                if(!GetScrollBarInfo(window,object,&info)||(info.rgstate[0]&(STATE_SYSTEM_INVISIBLE|STATE_SYSTEM_OFFSCREEN)))continue;
+                auto track=info.rcScrollBar;OffsetRect(&track,-bounds.left,-bounds.top);Fill(dc,track,Surface);
+                bool vertical=object==OBJID_VSCROLL;
+                auto thumb=track;
+                if(vertical){thumb.top=track.top+info.xyThumbTop;thumb.bottom=track.top+info.xyThumbBottom;InflateRect(&thumb,-Px(4),0);}
+                else{thumb.left=track.left+info.xyThumbTop;thumb.right=track.left+info.xyThumbBottom;InflateRect(&thumb,0,-Px(4));}
+                if(!(info.rgstate[0]&STATE_SYSTEM_UNAVAILABLE)&&info.xyThumbBottom>info.xyThumbTop)Round(dc,thumb,RGB(100,100,100),Px(6));
+                for(int end=0;end<2;++end) {
+                    int x=vertical?(track.left+track.right)/2:end?track.right-info.dxyLineButton/2:track.left+info.dxyLineButton/2;
+                    int y=vertical?(end?track.bottom-info.dxyLineButton/2:track.top+info.dxyLineButton/2):(track.top+track.bottom)/2;
+                    int direction=end?1:-1,d=Px(3);
+                    if(vertical){Line(dc,x-d,y-direction*d/2,x,y+direction*d/2,Muted);Line(dc,x,y+direction*d/2,x+d,y-direction*d/2,Muted);}
+                    else{Line(dc,x-direction*d/2,y-d,x+direction*d/2,y,Muted);Line(dc,x+direction*d/2,y,x-direction*d/2,y+d,Muted);}
+                }
+            }
+            ReleaseDC(window,dc);
+        }
+    }
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsScrollProc,3);
+    return result;
+}
 LRESULT CALLBACK SettingsComboProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    if(message==WM_CTLCOLOREDIT||message==WM_CTLCOLORSTATIC||message==WM_CTLCOLORLISTBOX) {
+        auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Surface);SetDCBrushColor(dc,Surface);
+        return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+    }
     auto result=DefSubclassProc(window,message,wParam,lParam);
     if(message==WM_NCPAINT||message==WM_PAINT||message==WM_SETFOCUS||message==WM_KILLFOCUS||message==WM_ENABLE||message==WM_MOUSEMOVE||message==WM_MOUSELEAVE||message==WM_LBUTTONUP) {
         auto dc=GetWindowDC(window);
         if(dc) {
             RECT rect{};GetWindowRect(window,&rect);OffsetRect(&rect,-rect.left,-rect.top);
-            auto brush=CreateSolidBrush(Background);
+            auto brush=CreateSolidBrush(Surface);
             // Cover the native recessed frame with the field's background.
             for(int i=0;i<3;++i){FrameRect(dc,&rect,brush);InflateRect(&rect,-1,-1);}
             COMBOBOXINFO info{sizeof(info)};
@@ -732,20 +767,63 @@ LRESULT CALLBACK SettingsEditProc(HWND window,UINT message,WPARAM wParam,LPARAM 
     if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsEditProc,1);
     return DefSubclassProc(window,message,wParam,lParam);
 }
+LRESULT CALLBACK SettingsCheckboxProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    if(message==WM_PAINT||message==WM_PRINTCLIENT) {
+        PAINTSTRUCT paint{};auto dc=message==WM_PAINT?BeginPaint(window,&paint):reinterpret_cast<HDC>(wParam);
+        RECT rect{};GetClientRect(window,&rect);Fill(dc,rect,ModalBody);
+        POINT pointer{};GetCursorPos(&pointer);ScreenToClient(window,&pointer);
+        bool checked=SendMessageW(window,BM_GETCHECK,0,0)==BST_CHECKED;
+        bool enabled=IsWindowEnabled(window)!=FALSE;
+        int top=(rect.bottom-Px(20))/2;
+        RECT box{0,top,Px(20),top+Px(20)};
+        Round(dc,box,checked&&enabled?Ink:PtInRect(&rect,pointer)?Muted:RGB(85,85,85),Px(5));
+        if(checked) {
+            Line(dc,Px(5),top+Px(10),Px(9),top+Px(14),Background,Px(2));
+            Line(dc,Px(9),top+Px(14),Px(15),top+Px(6),Background,Px(2));
+        }else{InflateRect(&box,-Px(1),-Px(1));Round(dc,box,Surface,Px(4));}
+        rect.left=Px(32);
+        Text(dc,ControlText(GetParent(window),GetDlgCtrlID(window)),rect,bodyFont,enabled?Ink:Muted,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        if(GetFocus()==window){InflateRect(&rect,-1,-Px(3));DrawFocusRect(dc,&rect);}
+        if(message==WM_PAINT)EndPaint(window,&paint);return 0;
+    }
+    if(message==WM_MOUSEMOVE){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,window,0};TrackMouseEvent(&tracking);}
+    auto result=DefSubclassProc(window,message,wParam,lParam);
+    if(message==BM_SETCHECK||message==WM_LBUTTONUP||message==WM_KEYUP||message==WM_SETFOCUS||message==WM_KILLFOCUS||message==WM_ENABLE||message==WM_MOUSEMOVE||message==WM_MOUSELEAVE)InvalidateRect(window,nullptr,FALSE);
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(window,SettingsCheckboxProc,1);
+    return result;
+}
 LRESULT CALLBACK SettingsPageProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    if(message==WM_ERASEBKGND) {
+        auto dc=reinterpret_cast<HDC>(wParam);RECT client{};GetClientRect(window,&client);Fill(dc,client,ModalBody);
+        for(auto child=GetWindow(window,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
+            wchar_t type[32]{};GetClassNameW(child,type,32);
+            if(lstrcmpiW(type,L"EDIT")&&lstrcmpiW(type,L"COMBOBOX"))continue;
+            RECT rect{};GetWindowRect(child,&rect);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&rect),2);
+            InflateRect(&rect,2,2);Round(dc,rect,Border,Px(6));InflateRect(&rect,-1,-1);Round(dc,rect,Surface,Px(6));
+        }
+        return TRUE;
+    }
+    if(message==WM_CTLCOLORDLG) {SetDCBrushColor(reinterpret_cast<HDC>(wParam),ModalBody);return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));}
     if(message==WM_CTLCOLOREDIT||message==WM_CTLCOLORSTATIC||message==WM_CTLCOLORLISTBOX) {
         wchar_t type[32]{};GetClassNameW(reinterpret_cast<HWND>(lParam),type,32);
         if(message!=WM_CTLCOLORSTATIC||lstrcmpiW(type,L"EDIT")==0||lstrcmpiW(type,L"COMBOBOX")==0) {
-            auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,Background);SetDCBrushColor(dc,Background);
+            auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,IsWindowEnabled(reinterpret_cast<HWND>(lParam))?Ink:Muted);SetBkColor(dc,Surface);SetDCBrushColor(dc,Surface);
             return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
         }
+        auto dc=reinterpret_cast<HDC>(wParam);SetTextColor(dc,Ink);SetBkColor(dc,ModalBody);SetDCBrushColor(dc,ModalBody);
+        return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
     }
     if(message==WM_DRAWITEM){
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-        Fill(item.hDC,item.rcItem,Surface);
+        Fill(item.hDC,item.rcItem,ModalBody);
         POINT pointer{};GetCursorPos(&pointer);bool hover=WindowFromPoint(pointer)==item.hwndItem;
-        Round(item.hDC,item.rcItem,(item.itemState&ODS_SELECTED)?RGB(62,62,62):hover?RGB(47,47,47):Panel,Px(6));
-        Text(item.hDC,ControlText(window,item.CtlID),item.rcItem,bodyFont,(item.itemState&ODS_DISABLED)?Muted:Ink,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        bool primary=item.CtlID==IDOK;
+        Round(item.hDC,item.rcItem,primary?(hover?RGB(215,215,215):Ink):(item.itemState&ODS_SELECTED)?RGB(62,62,62):hover?RGB(47,47,47):Surface,Px(6));
+        auto label=item.rcItem;
+        bool dropdown=item.CtlID==115;
+        if(dropdown){label.left+=Px(12);label.right-=Px(30);}
+        Text(item.hDC,ControlText(window,item.CtlID),label,labelFont,(item.itemState&ODS_DISABLED)?Muted:primary?Background:Ink,(dropdown?DT_LEFT:DT_CENTER)|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+        if(dropdown){int x=item.rcItem.right-Px(16),y=(item.rcItem.top+item.rcItem.bottom)/2;Line(item.hDC,x-Px(4),y-Px(2),x,y+Px(2),Muted);Line(item.hDC,x,y+Px(2),x+Px(4),y-Px(2),Muted);}
         if(item.itemState&ODS_FOCUS){auto focus=item.rcItem;InflateRect(&focus,-3,-3);DrawFocusRect(item.hDC,&focus);}
         return TRUE;
     }
@@ -761,11 +839,12 @@ struct SettingsTabsState {
 INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
     auto state=reinterpret_cast<SettingsTabsState*>(GetWindowLongPtrW(window,DWLP_USER));
     if(message==WM_INITDIALOG) {
-        InitModalChrome(window,L"Settings",960,805);
+        // Match the 24 DIP side gutters above the tabs and below the footer.
+        InitModalChrome(window,L"Settings",640,596);
         state=new SettingsTabsState;SetWindowLongPtrW(window,DWLP_USER,reinterpret_cast<LONG_PTR>(state));
         auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(window),96);};
         for(int id:{105,106,107,110}) {
-            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":id==107?L"Computer Control":L"System Prompt",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale((id==110?3:id-105)*240),scale(Header),scale(240),scale(66),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
+            auto button=CreateWindowW(L"BUTTON",id==105?L"Provider":id==106?L"MCP":id==107?L"Computer Control":L"System Prompt",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,scale(24+(id==110?3:id-105)*148),scale(Header+24),scale(148),scale(40),window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
             SetWindowLongPtrW(button,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
         }
         auto page=[&](DLGPROC proc) {
@@ -774,7 +853,7 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
             auto child=CreateDialogIndirectParamW(GetModuleHandleW(nullptr),&dialog.dialog,window,proc,0);
             if(!child)return child;
             SetWindowSubclass(child,SettingsPageProc,1,0);
-            // Enlarge every settings page while retaining the normal readable font size.
+            // Keep controls at their designed DIP size, using the app's shared typography.
             EnumChildWindows(child,[](HWND control,LPARAM parent)->BOOL {
                 auto page=reinterpret_cast<HWND>(parent);if(GetParent(control)!=page)return TRUE;
                 RECT rect{};GetWindowRect(control,&rect);
@@ -785,23 +864,34 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
                     SetWindowLongPtrW(control,GWL_STYLE,(style&~BS_TYPEMASK)|BS_OWNERDRAW);
                     SetWindowLongPtrW(control,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(ButtonProc));
                 }
+                if(lstrcmpiW(type,L"BUTTON")==0&&(GetWindowLongPtrW(control,GWL_STYLE)&BS_TYPEMASK)==BS_AUTOCHECKBOX)SetWindowSubclass(control,SettingsCheckboxProc,1,0);
                 if(lstrcmpiW(type,L"EDIT")==0) {
+                    SetWindowTheme(control,L"DarkMode_Explorer",nullptr);
+                    SetWindowSubclass(control,SettingsScrollProc,3,0);
                     SetWindowSubclass(control,SettingsEditProc,1,0);
                     SetWindowLongPtrW(control,GWL_EXSTYLE,GetWindowLongPtrW(control,GWL_EXSTYLE)&~WS_EX_CLIENTEDGE);
                     SetWindowLongPtrW(control,GWL_STYLE,(GetWindowLongPtrW(control,GWL_STYLE)&~WS_BORDER)|ES_NOHIDESEL);
                     SetWindowPos(control,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);
+                    SendMessageW(control,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(Px(8),Px(8)));
                 }
                 if(lstrcmpiW(type,L"COMBOBOX")==0) {
-                    SetWindowTheme(control,L"",L"");
+                    SetWindowTheme(control,L"DarkMode_CFD",nullptr);
                     SetWindowSubclass(control,SettingsComboProc,2,0);
                     COMBOBOXINFO info{sizeof(info)};
-                    if(GetComboBoxInfo(control,&info)&&info.hwndItem)SetWindowSubclass(info.hwndItem,SettingsEditProc,1,0);
+                    if(GetComboBoxInfo(control,&info)) {
+                        if(info.hwndItem){SetWindowTheme(info.hwndItem,L"DarkMode_Explorer",nullptr);SetWindowSubclass(info.hwndItem,SettingsEditProc,1,0);}
+                        if(info.hwndList){SetWindowTheme(info.hwndList,L"DarkMode_Explorer",nullptr);SetWindowSubclass(info.hwndList,SettingsScrollProc,3,0);}
+                    }
                 }
                 MapWindowPoints(nullptr,page,reinterpret_cast<POINT*>(&rect),2);
-                MoveWindow(control,MulDiv(rect.left,3,2),MulDiv(rect.top,3,2),MulDiv(rect.right-rect.left,3,2),MulDiv(rect.bottom-rect.top,3,2),TRUE);
+                int id=GetDlgCtrlID(control);
+                if(id==IDOK||id==IDCANCEL) {
+                    auto scale=[&](int n){return MulDiv(n,GetDpiForWindow(page),96);};
+                    MoveWindow(control,scale(id==IDOK?516:404),scale(464),scale(id==IDOK?100:96),scale(36),TRUE);
+                }
                 return TRUE;
             },reinterpret_cast<LPARAM>(child));
-            MoveWindow(child,0,scale(Header+66),scale(960),scale(739),TRUE);return child;
+            MoveWindow(child,0,scale(Header+72),scale(640),scale(524),TRUE);return child;
         };
         state->provider=page(ProviderSettingsProc);state->mcp=page(McpSettingsProc);state->computer=page(ComputerSettingsProc);state->prompt=page(SystemPromptSettingsProc);
         if(!state->provider||!state->mcp||!state->computer||!state->prompt){EndDialog(window,IDCANCEL);return TRUE;}
@@ -852,10 +942,10 @@ INT_PTR CALLBACK SettingsTabsProc(HWND window,UINT message,WPARAM wParam,LPARAM 
     if(message==WM_DRAWITEM&&state&&(wParam==105||wParam==106||wParam==107||wParam==110)) {
         auto& item=*reinterpret_cast<DRAWITEMSTRUCT*>(lParam);bool selected=state->selected==static_cast<int>(item.CtlID);
         POINT point{};GetCursorPos(&point);ScreenToClient(item.hwndItem,&point);
-        Fill(item.hDC,item.rcItem,selected?Surface:PtInRect(&item.rcItem,point)?RGB(40,40,40):Panel);
+        Fill(item.hDC,item.rcItem,ModalBody);
+        if(selected||PtInRect(&item.rcItem,point))Round(item.hDC,item.rcItem,selected?Surface:Panel,Px(6));
         Text(item.hDC,item.CtlID==105?L"Provider":item.CtlID==106?L"MCP":item.CtlID==107?L"Computer Control":L"System Prompt",item.rcItem,labelFont,selected?Ink:Muted,DT_SINGLELINE|DT_CENTER|DT_VCENTER|DT_NOPREFIX);
-        Line(item.hDC,item.rcItem.left,item.rcItem.bottom-1,item.rcItem.right,item.rcItem.bottom-1,selected?RGB(110,110,110):Border);
-        if(item.CtlID==105)Line(item.hDC,item.rcItem.right-1,item.rcItem.top,item.rcItem.right-1,item.rcItem.bottom);
+        if(item.itemState&ODS_FOCUS){auto focus=item.rcItem;InflateRect(&focus,-3,-3);DrawFocusRect(item.hDC,&focus);}
         return TRUE;
     }
     if(message==WM_CLOSE){EndDialog(window,IDCANCEL);return TRUE;}
@@ -1266,7 +1356,7 @@ LRESULT CALLBACK ModalChromeProc(HWND window,UINT message,WPARAM wParam,LPARAM l
     case WM_ERASEBKGND:return 1;
     case WM_PAINT: {
         PAINTSTRUCT paint{};auto dc=BeginPaint(window,&paint);RECT rect{};GetClientRect(window,&rect);
-        Fill(dc,rect,Surface);Fill(dc,{0,0,rect.right,scale(Header)},ModalHeader);
+        Fill(dc,rect,ModalBody);Fill(dc,{0,0,rect.right,scale(Header)},ModalHeader);
         wchar_t title[128]{};GetWindowTextW(window,title,128);
         Text(dc,title,{scale(Space),0,rect.right-scale(Header+16),scale(Header)},labelFont,Ink,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|DT_END_ELLIPSIS);
         Line(dc,0,scale(Header)-1,rect.right,scale(Header)-1);

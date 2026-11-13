@@ -90,7 +90,7 @@ Input affects the active desktop and focused application, with the app's ordinar
 
 ## MCP servers
 
-Open **Settings** and select the **MCP** tab beside **Provider**. The tabs use square edges and 1px separators. Add servers using the standard `mcpServers` JSON object, click **Test connections** to see discovered tools, then **Save**. Switching tabs retains your edits, and Save validates and keeps changes from both tabs. **Example** inserts disabled local and remote entries. Cancel discards unsaved edits.
+Open **Settings** and select the **MCP** tab beside **Provider**. Settings uses compact tabs, dark inset fields, and a consistent footer with a primary Save button. Add servers using the standard `mcpServers` JSON object, click **Test connections** to see discovered tools, then **Save**. Switching tabs retains your edits, and Save validates and keeps changes from both tabs. **Example** inserts disabled local and remote entries. Cancel discards unsaved edits.
 
 **Disable** immediately saves a global MCP-off setting, retaining all server definitions and credentials. The button changes to **Enable** so MCP can be restored without re-entering server details. This affects new prompts; in-progress requests keep their existing connections. Each individual server can also use `"enabled": false` in the JSON configuration.
 

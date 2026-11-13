@@ -43,12 +43,14 @@ struct Parser {
     std::vector<Span> spans;
     std::optional<size_t> active,table;
     unsigned style=0;std::wstring href;int quote=0;bool cell=false;
+    int imageDepth=0;std::wstring imageSource,imageAlt;
     void New(MdKind kind) {
         MdBlock block;block.kind=kind;block.indent=static_cast<int>(lists.size());block.quote=quote;
         blocks.push_back(std::move(block));active=blocks.size()-1;
     }
     void Append(std::wstring text) {
         if(text.empty())return;
+        if(imageDepth){imageAlt+=text;return;}
         if(table&&cell){auto& runs=blocks[*table].rows.back().back().runs;Add(runs,std::move(text));return;}
         if(!active)New(MdKind::Paragraph);
         auto& block=blocks[*active];if(block.kind==MdKind::Code){block.text+=text;return;}
@@ -106,13 +108,19 @@ struct Parser {
         case MD_SPAN_CODE:p.style|=MdCode;break;
         case MD_SPAN_DEL:p.style|=MdStrike;break;
         case MD_SPAN_A:p.style|=MdLink;p.href=Attribute(static_cast<MD_SPAN_A_DETAIL*>(detail)->href);break;
-        case MD_SPAN_IMG:p.Append(L"[Image: ");break;
+        case MD_SPAN_IMG:
+            if(p.imageDepth++==0){p.imageSource=Attribute(static_cast<MD_SPAN_IMG_DETAIL*>(detail)->src);p.imageAlt.clear();}break;
         default:break;
         }
         return 0;
     }
     static int LeaveSpan(MD_SPANTYPE type,void*,void* context) {
-        auto& p=*static_cast<Parser*>(context);if(type==MD_SPAN_IMG)p.Append(L"]");
+        auto& p=*static_cast<Parser*>(context);
+        if(type==MD_SPAN_IMG&&--p.imageDepth==0) {
+            if(!p.active&&!(p.table&&p.cell))p.New(MdKind::Paragraph);
+            auto& runs=p.table&&p.cell?p.blocks[*p.table].rows.back().back().runs:p.blocks[*p.active].runs;
+            runs.push_back({p.imageAlt,MdImage,p.imageSource});
+        }
         p.style=p.spans.back().style;p.href=p.spans.back().href;p.spans.pop_back();return 0;
     }
     static int Text(MD_TEXTTYPE type,const MD_CHAR* text,MD_SIZE size,void* context) {
